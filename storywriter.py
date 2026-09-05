@@ -36,6 +36,8 @@ PLOT_SCENE_CHARS = 100
 SCENE_TARGET_CHARS = 1000
 SCENE_CLIMAX_CHARS = 1500
 PAST_PLOT_COUNT = 3
+PAST_SCENES_PER_WINDOW = 3
+PREVIOUS_CONTEXT_SCENES = 5
 FUTURE_PLOT_COUNT = 3
 WORLDVIEW_UPDATE_INTERVAL = 5
 WORLDVIEW_REVIEW_CHARS = 6000
@@ -45,6 +47,7 @@ OUTPUT_ROOT = SCRIPT_DIR / "output"
 
 DONE_MARK = "[済]"
 PENDING_MARK = "[未]"
+SOURCE_MARK = "[既出]"
 
 SYSTEM_WRITER = (
     "あなたは日本語の小説家です。指定された形式を厳守し、"
@@ -102,9 +105,15 @@ _PARTIAL_TAG_SUFFIXES = tuple(
 class PlotScene:
     text: str
     done: bool
+    from_source: bool = False
 
     def to_line(self) -> str:
-        mark = DONE_MARK if self.done else PENDING_MARK
+        if self.from_source:
+            mark = SOURCE_MARK
+        elif self.done:
+            mark = DONE_MARK
+        else:
+            mark = PENDING_MARK
         return f"{mark} {self.text}"
 
 
@@ -408,7 +417,7 @@ class OllamaClient:
 # プロット入出力
 # ---------------------------------------------------------------------------
 _LINE_PREFIX = re.compile(
-    r"^(?:[-*・]|\[済\]|\[未\])?\s*"
+    r"^(?:[-*・]|\[済\]|\[未\]|\[既出\])?\s*"
     r"(?:\d+[\.．、:：)]\s*)?"
 )
 
@@ -424,17 +433,23 @@ def parse_plot_file(text: str) -> list[PlotScene]:
             continue
         if re.fullmatch(r"(これまでのシーン|これからのシーン|プロット)[:：]?", line):
             continue
-        done_mark = line.startswith(DONE_MARK)
+        from_source = line.startswith(SOURCE_MARK)
+        done_mark = from_source or line.startswith(DONE_MARK)
         pending_mark = line.startswith(PENDING_MARK)
-        if done_mark or pending_mark:
+        if done_mark or pending_mark or from_source:
             saw_mark = True
         body = _LINE_PREFIX.sub("", line).strip()
         if not body:
             continue
-        scenes.append(PlotScene(text=body, done=done_mark))
+        scenes.append(PlotScene(text=body, done=done_mark, from_source=from_source))
     if scenes and not saw_mark:
         for scene in scenes[:PAST_PLOT_COUNT]:
             scene.done = True
+            scene.from_source = True
+    elif scenes and not any(scene.from_source for scene in scenes):
+        for scene in scenes[:PAST_PLOT_COUNT]:
+            if scene.done:
+                scene.from_source = True
     return scenes
 
 
@@ -469,7 +484,7 @@ def extract_scene_lines(text: str, expected: int) -> list[str]:
 
 def plot_lines_usable(scenes: Iterable[PlotScene]) -> bool:
     items = list(scenes)
-    if len(items) < PAST_PLOT_COUNT:
+    if len(items) < 2:
         return False
     for scene in items:
         if "\n" in scene.text or "<|channel" in scene.text or "<channel|" in scene.text:
@@ -479,9 +494,37 @@ def plot_lines_usable(scenes: Iterable[PlotScene]) -> bool:
     return True
 
 
-def previous_scenes(plot: list[PlotScene], target_index: int, count: int = PAST_PLOT_COUNT) -> list[PlotScene]:
+def previous_scenes(
+    plot: list[PlotScene],
+    target_index: int,
+    count: int = PREVIOUS_CONTEXT_SCENES,
+) -> list[PlotScene]:
     start = max(0, target_index - count)
     return plot[start:target_index]
+
+
+def written_scene_count(plot: Iterable[PlotScene]) -> int:
+    return sum(1 for scene in plot if scene.done and not scene.from_source)
+
+
+def windows_from_end(text: str, size: int = CHAR_WINDOW) -> list[tuple[int, int, str]]:
+    """末尾から size 字ずつ遡った断片。先頭が最も新しい末尾。"""
+    windows: list[tuple[int, int, str]] = []
+    end = len(text)
+    while end > 0:
+        start = max(0, end - size)
+        excerpt = text[start:end]
+        if excerpt.strip():
+            windows.append((start, end, excerpt))
+        end = start
+    return windows
+
+
+def scenes_for_window(length: int, *, is_latest: bool) -> int:
+    if is_latest:
+        return PAST_SCENES_PER_WINDOW
+    estimated = max(1, round(length / CHAR_WINDOW * PAST_SCENES_PER_WINDOW))
+    return max(1, min(PAST_SCENES_PER_WINDOW, estimated))
 
 
 def _char_ngrams(text: str, size: int = 3) -> set[str]:
@@ -518,11 +561,6 @@ def is_duplicate_plot(candidate: str, existing: Iterable[PlotScene | str], thres
         if len(text) > len(candidate) * 2 and plot_coverage(candidate, text) >= 0.5:
             return True
     return False
-
-
-def is_duplicate_plot(candidate: str, existing: Iterable[PlotScene | str], threshold: float = 0.42) -> bool:
-    texts = [item.text if isinstance(item, PlotScene) else item for item in existing]
-    return any(plot_similarity(candidate, text) >= threshold for text in texts if text.strip())
 
 
 def future_plots_stale(
@@ -599,23 +637,34 @@ def prompt_worldview(head: str) -> str:
 """
 
 
-def prompt_initial_plot(tail: str, worldview: str) -> str:
-    return f"""次の小説の世界観と本文末尾を読み、プロットを作成してください。
+def prompt_extract_past_scenes(
+    excerpt: str,
+    worldview: str,
+    expected: int,
+    later_scenes: list[str],
+    window_note: str,
+) -> str:
+    later_block = ""
+    if later_scenes:
+        later_text = "\n".join(f"- {scene}" for scene in later_scenes)
+        later_block = (
+            f"\n# これより後の本文ですでに抽出したシーン（重複禁止）\n{later_text}\n"
+        )
+    return f"""次の本文断片に書かれている出来事だけを、時系列順に{expected}シーンで要約してください。
+まだ起きていない続きは書かないでください。
 
 # 世界観
 {worldview.strip()}
-
-# 本文末尾（ここまでが既に書かれている。ベース本文）
-{tail}
+{later_block}
+# 本文断片（{window_note}）
+{excerpt}
 
 出力ルール:
-- 合計{PAST_PLOT_COUNT + FUTURE_PLOT_COUNT}行だけ出力する
+- ちょうど{expected}行だけ出力する
 - 1行1シーン、各シーン約{PLOT_SCENE_CHARS}字
-- 最初の{PAST_PLOT_COUNT}行は「これまでのシーン」。本文末尾にすでに起きている直近の出来事だけを要約する
-- 残りの{FUTURE_PLOT_COUNT}行は「これからのシーン」。本文の最後の文の「その後」に起きる、まだ書かれていない新しい展開だけを書く
-- これからのシーンは、本文末尾の言い換え・繰り返し・同じ場面の延長であってはならない
-- これからのシーンでは、時間・場所・相手・目的の少なくとも一つを進めて、物語を先へ動かす
-- 見出し・番号・前置きは不要。シーンの説明文だけを1行ずつ書く
+- この断片の中で実際に起きている出来事だけを、古い順に書く
+- 後続シーンと同じ出来事は書かない
+- 見出し・番号・前置きは不要
 - 思考過程、英語、特殊タグは出力しない
 - 各行の中に改行を入れない
 """
@@ -685,7 +734,12 @@ def prompt_normalize_plot(
     worldview: str,
     past_count: int = 0,
 ) -> str:
-    if past_count > 0:
+    if past_count >= expected:
+        split_rule = (
+            f"- {expected}行すべてが、この本文断片にすでに書かれている出来事の要約\n"
+            f"- まだ起きていない続きは書かない"
+        )
+    elif past_count > 0:
         split_rule = (
             f"- 最初の{past_count}行は、本文末尾にすでに書かれている出来事の要約\n"
             f"- 残りの{expected - past_count}行は、本文にも既存プロットの既出部分にも無い、新しい続き"
@@ -817,25 +871,60 @@ class StoryWriter:
                 return scenes
             log("プロット.txt の形式が不正なため、本文末尾から作り直します（本編は保持します）。")
 
-        tail = last_chars(combined_body(source, self.honpen_path))
-        log(f"プロットを作成しています（末尾 {len(tail)} 字）...")
-        expected = PAST_PLOT_COUNT + FUTURE_PLOT_COUNT
-        lines = self._generate_plot_lines(
-            prompt_initial_plot(tail, worldview),
-            expected=expected,
+        body = combined_body(source, self.honpen_path)
+        past = self._extract_source_plot(body, worldview)
+        tail = last_chars(body)
+        log("これからのシーンを作成しています...")
+        future_lines = self._generate_plot_lines(
+            prompt_next_plot(tail, past, worldview),
+            expected=FUTURE_PLOT_COUNT,
             tail=tail,
             worldview=worldview,
             create_label="プロット作成",
-            past_count=PAST_PLOT_COUNT,
-            existing=[],
+            past_count=0,
+            existing=past,
         )
-        plot = [
-            PlotScene(text=line, done=(i < PAST_PLOT_COUNT))
-            for i, line in enumerate(lines)
-        ]
+        plot = past + [PlotScene(text=line, done=False) for line in future_lines]
         write_text(self.plot_path, dump_plot(plot))
-        log("プロット.txt を保存しました。")
+        log(
+            f"プロット.txt を保存しました"
+            f"（既出 {sum(1 for scene in past if scene.from_source)} シーン"
+            f" + これから {FUTURE_PLOT_COUNT} シーン）。"
+        )
         return plot
+
+    def _extract_source_plot(self, source: str, worldview: str) -> list[PlotScene]:
+        windows = windows_from_end(source)
+        if not windows:
+            return []
+        groups: list[list[str]] = []
+        later: list[str] = []
+        for index, (start, end, excerpt) in enumerate(windows):
+            is_latest = index == 0
+            expected = scenes_for_window(len(excerpt), is_latest=is_latest)
+            note = f"全体 {len(source)} 字のうち {start + 1}〜{end} 字目"
+            log(f"既出シーンを抽出しています（{note} / {expected} シーン）...")
+            lines = self._generate_plot_lines(
+                prompt_extract_past_scenes(
+                    excerpt,
+                    worldview,
+                    expected,
+                    later,
+                    note,
+                ),
+                expected=expected,
+                tail=excerpt,
+                worldview=worldview,
+                create_label=f"既出プロット_{index + 1}",
+                past_count=expected,
+                existing=[PlotScene(text=item, done=True, from_source=True) for item in later],
+            )
+            groups.append(lines)
+            later = lines + later
+        chronological = [line for group in reversed(groups) for line in group]
+        return [
+            PlotScene(text=line, done=True, from_source=True) for line in chronological
+        ]
 
     def _generate_plot_lines(
         self,
@@ -874,19 +963,29 @@ class StoryWriter:
                 lines = extract_scene_lines(raw, expected)
             if len(lines) >= expected:
                 lines = [re.sub(r"\s+", " ", line).strip() for line in lines[:expected]]
-                if future_plots_stale(
+                duplicated = existing_list and any(
+                    is_duplicate_plot(line, existing_list) for line in lines
+                )
+                stale_future = future_plots_stale(
                     lines,
                     past_count=past_count,
                     existing=existing_list,
                     tail=tail,
-                ):
+                )
+                if duplicated or (past_count < expected and stale_future):
                     last_error = "新しいシーンが既存内容と重複しています"
-                    log(f"{last_error}。場面転換して再試行 {attempt}/3")
-                    current_prompt = (
-                        prompt
-                        + "\n\n【重要】新しいシーンが既存の本文・プロットと同じ状況に寄っています。"
-                        "場所・時間・相手・目的のいずれかを変えて場面転換し、まだ書かれていない展開だけを書いてください。"
-                    )
+                    log(f"{last_error}。再試行 {attempt}/3")
+                    if past_count >= expected:
+                        current_prompt = (
+                            prompt
+                            + "\n\n【再出力】後続シーンと重複せず、この断片に書かれている出来事だけを時系列で出力すること。"
+                        )
+                    else:
+                        current_prompt = (
+                            prompt
+                            + "\n\n【重要】新しいシーンが既存の本文・プロットと同じ状況に寄っています。"
+                            "場所・時間・相手・目的のいずれかを変えて場面転換し、まだ書かれていない展開だけを書いてください。"
+                        )
                     continue
                 return lines
             last_error = f"{len(lines)} 行しか得られませんでした"
@@ -986,7 +1085,7 @@ class StoryWriter:
             self.stats.scene_chars += len(scene_text)
             log(f"本編.txt に追記しました（{len(scene_text)} 字）。")
 
-            done_written = max(0, sum(1 for scene in plot if scene.done) - PAST_PLOT_COUNT)
+            done_written = written_scene_count(plot)
             if done_written > 0 and done_written % WORLDVIEW_UPDATE_INTERVAL == 0:
                 worldview = self.refresh_worldview(worldview)
 
@@ -1062,7 +1161,7 @@ def save_stats(
         prev_seconds = 0.0
     plot_total = 0
     if plot:
-        plot_total = max(0, sum(1 for scene in plot if scene.done) - PAST_PLOT_COUNT)
+        plot_total = written_scene_count(plot)
     total_scenes = prev_scenes + stats.scenes_written
     if not args.fresh:
         total_scenes = max(total_scenes, plot_total)
