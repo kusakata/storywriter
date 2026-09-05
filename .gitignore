@@ -1,0 +1,22 @@
+# 入力テキスト
+*.txt
+
+# 生成物
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+
+# エディタ / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*~
+*.swp
