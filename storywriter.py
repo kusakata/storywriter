@@ -8,6 +8,7 @@
   python storywriter.py novel.txt -n 6
   python storywriter.py novel.txt --url http://localhost:11434 --model llama3
   python storywriter.py novel.txt --plot-only
+  python storywriter.py novel.txt -q
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import sys
 import time
@@ -297,8 +299,31 @@ def clean_llm_text(text: str) -> str:
     return text.strip()
 
 
-def log(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+ANSI_GRAY = "\033[90m"
+ANSI_RESET = "\033[0m"
+_quiet = False
+
+
+def set_quiet(enabled: bool) -> None:
+    global _quiet
+    _quiet = enabled
+
+
+def use_log_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if not sys.platform.startswith("linux"):
+        return False
+    return bool(sys.stderr.isatty())
+
+
+def log(message: str, *, always: bool = False) -> None:
+    if _quiet and not always:
+        return
+    text = message
+    if not always and use_log_color():
+        text = f"{ANSI_GRAY}{message}{ANSI_RESET}"
+    print(text, file=sys.stderr, flush=True)
 
 
 def format_duration(seconds: float) -> str:
@@ -387,9 +412,11 @@ class OllamaClient:
         temperature: float = 0.8,
         num_predict: int = 2048,
         num_ctx: int = 8192,
-        show_stream: bool = True,
+        show_stream: bool | None = None,
         label: str = "generate",
     ) -> str:
+        if show_stream is None:
+            show_stream = not _quiet
         if self.prompt_logger is not None:
             self.prompt_logger.save(label, prompt, system)
         payload = {
@@ -722,7 +749,10 @@ def fetch_recent_news(limit: int = NEWS_ITEM_LIMIT) -> list[NewsItem]:
             ) as response:
                 raw = response.read()
         except urllib.error.URLError as exc:
-            log(f"ニュース取得に失敗しました ({url}): {exc.reason}")
+            log(
+                f"ニュース取得に失敗しました ({url}): {exc.reason}",
+                always=True,
+            )
             continue
         for item in _parse_rss_items(raw):
             if item.title in seen:
@@ -1127,6 +1157,7 @@ class StoryWriter:
                 ),
                 temperature=0.2,
                 num_predict=1024,
+                show_stream=False,
                 label=format_label,
             )
             lines = extract_scene_lines(formatted, expected)
@@ -1361,6 +1392,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="本編は書かず、プロットへこれから書くシーンだけを追加する",
     )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="生成テキストと進捗メッセージの表示を抑える",
+    )
     args = parser.parse_args(argv)
     if args.scenes < 1:
         parser.error("シーン数は 1 以上を指定してください。")
@@ -1464,9 +1501,10 @@ def save_stats(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    set_quiet(args.quiet)
     input_path = args.input.expanduser().resolve()
     if not input_path.is_file():
-        log(f"入力ファイルが見つかりません: {input_path}")
+        log(f"入力ファイルが見つかりません: {input_path}", always=True)
         return 1
 
     source = read_text(input_path)
@@ -1474,7 +1512,7 @@ def main(argv: list[str] | None = None) -> int:
         source = source[1:]
     source = source.strip("\n")
     if not source.strip():
-        log("入力ファイルが空です。")
+        log("入力ファイルが空です。", always=True)
         return 1
 
     work_dir = OUTPUT_ROOT / input_path.stem
@@ -1539,7 +1577,10 @@ def main(argv: list[str] | None = None) -> int:
             writer.news_text = digest
             log(f"時事ネタ {len(news_items)} 件をプロット作成に使います。")
         else:
-            log("ニュースを取得できなかったため、時事ネタなしで続行します。")
+            log(
+                "ニュースを取得できなかったため、時事ネタなしで続行します。",
+                always=True,
+            )
     writer.sanitize_outputs()
 
     ok = False
@@ -1555,7 +1596,7 @@ def main(argv: list[str] | None = None) -> int:
             writer.write_scenes(source, worldview, plot, args.scenes)
         ok = True
     except RuntimeError as exc:
-        log(str(exc))
+        log(str(exc), always=True)
     finally:
         save_stats(
             work_dir / "統計.txt",
@@ -1570,9 +1611,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if ok:
         if args.plot_only:
-            log(f"完了しました: {writer.plot_path}")
+            log(f"完了しました: {writer.plot_path}", always=True)
         else:
-            log(f"完了しました: {writer.honpen_path}")
+            log(f"完了しました: {writer.honpen_path}", always=True)
         return 0
     return 1
 
