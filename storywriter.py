@@ -9,6 +9,8 @@
   python storywriter.py novel.txt --url http://localhost:11434 --model llama3
   python storywriter.py novel.txt --plot-only
   python storywriter.py novel.txt -q
+  python storywriter.py novel.txt --no-shift
+  python storywriter.py novel.txt --ending
 """
 
 from __future__ import annotations
@@ -153,6 +155,8 @@ class RunStats:
     news_enabled: bool = False
     news_count: int = 0
     plot_only: bool = False
+    no_shift: bool = False
+    ending: bool = False
     started_at: datetime = field(default_factory=datetime.now)
     started_mono: float = field(default_factory=time.monotonic)
 
@@ -838,6 +842,9 @@ def prompt_next_plot(
     worldview: str,
     news_text: str = "",
     expected: int = FUTURE_PLOT_COUNT,
+    *,
+    no_shift: bool = False,
+    ending: bool = False,
 ) -> str:
     plot_text = dump_plot(plot).strip()
     news_block = ""
@@ -850,8 +857,34 @@ def prompt_next_plot(
             "- 舞台が現代でない場合は、主題をその世界の事件・噂・制度に翻訳する\n"
             "- 全シーンを報道の再現にしない\n"
         )
-    return f"""既存の世界観・プロット・本文末尾を踏まえ、これから書く次のシーンを{expected}つ作成してください。
-これは長編小説の続きです。同じ場面を引き伸ばすのではなく、物語全体を前へ進めてください。
+    lead = (
+        f"既存の世界観・プロット・本文末尾を踏まえ、これから書く次の"
+        f"シーンを{expected}つ作成してください。\n"
+        "これは長編小説の続きです。"
+    )
+    if not no_shift:
+        lead += (
+            "同じ場面を引き伸ばすのではなく、物語全体を前へ進めてください。"
+        )
+    if ending:
+        lead += (
+            "物語の締めくくりとして自然に収まる展開にしてください。"
+        )
+    shift_rules = ""
+    if not no_shift:
+        shift_rules = (
+            "- 本文末尾や既存シーンと同じ出来事・同じ会話・同じ状況の"
+            "繰り返しは禁止\n"
+            "- 同じ場所や同じやり取りが続きそうなら、時間経過・場所移動・"
+            "新たな人物や事件で場面を切り替える\n"
+        )
+    ending_rules = ""
+    if ending:
+        ending_rules = (
+            "- 長編の締めくくりとしてふさわしい着地へ向かう\n"
+            "- 急な打ち切りや未消化の山場を残さず、読後感がよくなるようにする\n"
+        )
+    return f"""{lead}
 
 # 世界観
 {worldview.strip()}
@@ -866,9 +899,7 @@ def prompt_next_plot(
 - {expected}行だけ出力する
 - 1行1シーン、各シーン約{PLOT_SCENE_CHARS}字
 - 既存プロットの続きとして自然につながる
-- 本文末尾や既存シーンと同じ出来事・同じ会話・同じ状況の繰り返しは禁止
-- 同じ場所や同じやり取りが続きそうなら、時間経過・場所移動・新たな人物や事件で場面を切り替える
-{news_rules}- 見出し・番号・前置きは不要
+{shift_rules}{ending_rules}{news_rules}- 見出し・番号・前置きは不要
 - 思考過程、英語、特殊タグは出力しない
 - 各行の中に改行を入れない
 """
@@ -911,6 +942,9 @@ def prompt_normalize_plot(
     tail: str,
     worldview: str,
     past_count: int = 0,
+    *,
+    no_shift: bool = False,
+    ending: bool = False,
 ) -> str:
     if past_count >= expected:
         split_rule = (
@@ -926,6 +960,16 @@ def prompt_normalize_plot(
         split_rule = (
             f"- {expected}行すべてが、本文末尾や既存シーンにまだ書かれていない新しい展開"
         )
+    extra = ""
+    if past_count < expected and not no_shift:
+        extra += (
+            "- 新しいシーンは本文末尾の言い換えにしない。"
+            "必要なら場所・時間・相手を切り替えて物語を進める\n"
+        )
+    if past_count < expected and ending:
+        extra += (
+            "- 新しいシーンは物語の締めくくりとしてふさわしい着地へ向かう\n"
+        )
     return f"""次のテキストは小説のシーン説明です。世界観と本文末尾を参照し、指定形式へ加工してください。
 
 形式:
@@ -936,8 +980,7 @@ def prompt_normalize_plot(
 - 番号、箇条書き記号、見出し、英語、思考過程、特殊タグは付けない
 - 前置きと後書きは禁止
 {split_rule}
-- 新しいシーンは本文末尾の言い換えにしない。必要なら場所・時間・相手を切り替えて物語を進める
-
+{extra}
 # 世界観
 {worldview.strip()}
 
@@ -954,11 +997,28 @@ def prompt_write_scene(
     prev: list[PlotScene],
     target: PlotScene,
     tail: str,
+    *,
+    no_shift: bool = False,
+    ending: bool = False,
 ) -> str:
     if prev:
         prev_text = "\n".join(f"- {scene.text}" for scene in prev)
     else:
         prev_text = "- （冒頭のため直前シーンなし）"
+    extra_rules = ""
+    if not no_shift:
+        extra_rules += (
+            "- 同じ会話、同じ場所、同じ心情描写の繰り返しになったら、"
+            "時間経過や場所移動で場面を切り替えて先へ進める\n"
+            "- 長編の一場面として、そのシーンで状況が少しでも"
+            "前に進むように書く\n"
+        )
+    if ending:
+        extra_rules += (
+            "- このシーンは小説の締めくくりとしてふさわしい終わり方にする\n"
+            "- 末尾は余韻が残るようにきれいに閉じ、読後感を良くする\n"
+            "- 続きを急かす中途半端な切れ方や、説明で畳む終わりは避ける\n"
+        )
     return f"""以下の情報を踏まえ、指定されたシーンの「新しい本文」だけを執筆してください。
 
 # 世界観
@@ -979,9 +1039,7 @@ def prompt_write_scene(
 - 今回のシーンで起きるべき出来事を、小説の地の文と会話で描く
 - 分量は約{SCENE_TARGET_CHARS}字を基本とする
 - 対立、告白、暴力、重要な選択など物語が盛り上がる場面では、必要に応じて約{SCENE_CLIMAX_CHARS}字まで伸ばしてよい
-- 同じ会話、同じ場所、同じ心情描写の繰り返しになったら、時間経過や場所移動で場面を切り替えて先へ進める
-- 長編の一場面として、そのシーンで状況が少しでも前に進むように書く
-- 日本語として破綻なく、そのシーンとして完結する形で終わる（文の途中で切らない）
+{extra_rules}- 日本語として破綻なく、そのシーンとして完結する形で終わる（文の途中で切らない）
 - タイトル、シーン番号、解説、メタ情報、思考過程、特殊タグは出力しない
 - 本文のみを日本語で出力する
 """
@@ -1063,7 +1121,14 @@ class StoryWriter:
         tail = last_chars(body)
         log("これからのシーンを作成しています...")
         future_lines = self._generate_plot_lines(
-            prompt_next_plot(tail, past, worldview, self.news_text),
+            prompt_next_plot(
+                tail,
+                past,
+                worldview,
+                self.news_text,
+                no_shift=self.stats.no_shift,
+                ending=self.stats.ending,
+            ),
             expected=FUTURE_PLOT_COUNT,
             tail=tail,
             worldview=worldview,
@@ -1154,6 +1219,8 @@ class StoryWriter:
                     tail,
                     worldview,
                     past_count=past_count,
+                    no_shift=self.stats.no_shift,
+                    ending=self.stats.ending,
                 ),
                 temperature=0.2,
                 num_predict=1024,
@@ -1178,6 +1245,8 @@ class StoryWriter:
                     tail=tail,
                 )
                 if duplicated or (past_count < expected and stale_future):
+                    if self.stats.no_shift and past_count < expected:
+                        return lines
                     last_error = "新しいシーンが既存内容と重複しています"
                     log(f"{last_error}。再試行 {attempt}/3")
                     if past_count >= expected:
@@ -1245,7 +1314,13 @@ class StoryWriter:
         log(f"プロットの続き（次の{count}シーン）を作成しています...")
         lines = self._generate_plot_lines(
             prompt_next_plot(
-                tail, plot, worldview, self.news_text, expected=count
+                tail,
+                plot,
+                worldview,
+                self.news_text,
+                expected=count,
+                no_shift=self.stats.no_shift,
+                ending=self.stats.ending,
             ),
             expected=count,
             tail=tail,
@@ -1311,7 +1386,14 @@ class StoryWriter:
 
             log(f"[{i}/{count}] シーンを執筆しています: {target.text[:40]}...")
             raw = self.client.generate(
-                prompt_write_scene(worldview, prev, target, tail),
+                prompt_write_scene(
+                    worldview,
+                    prev,
+                    target,
+                    tail,
+                    no_shift=self.stats.no_shift,
+                    ending=self.stats.ending,
+                ),
                 temperature=0.85,
                 num_predict=4096,
                 label=f"シーン執筆_{i}",
@@ -1397,6 +1479,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--quiet",
         action="store_true",
         help="生成テキストと進捗メッセージの表示を抑える",
+    )
+    parser.add_argument(
+        "--no-shift",
+        action="store_true",
+        help=(
+            "同じ出来事の禁止と場面切り替えの促しを"
+            "プロンプトから外す"
+        ),
+    )
+    parser.add_argument(
+        "--ending",
+        action="store_true",
+        help=(
+            "小説の締めくくりとしてシーン末尾をきれいに閉じ、"
+            "読後感を良くする"
+        ),
     )
     args = parser.parse_args(argv)
     if args.scenes < 1:
@@ -1484,6 +1582,8 @@ def save_stats(
         f"世界観更新回数: {stats.worldview_updates}\n"
         f"時事ネタ: {news_status}\n"
         f"本編執筆: {'なし（プロットのみ）' if stats.plot_only else 'あり'}\n"
+        f"場面転換の促し: {'オフ' if stats.no_shift else 'オン'}\n"
+        f"締めくくり: {'オン' if stats.ending else 'オフ'}\n"
         f"保存したプロンプト数: {prompt_logger.saved}\n"
         f"結果: {'完了' if ok else 'エラー'}\n"
     )
@@ -1542,6 +1642,10 @@ def main(argv: list[str] | None = None) -> int:
         log("時事ネタモード: オン")
     if args.plot_only:
         log("プロットのみモード: 本編は書きません")
+    if args.no_shift:
+        log("場面転換の促し: オフ")
+    if args.ending:
+        log("締めくくりモード: オン")
     if resuming:
         if args.plot_only:
             log(
@@ -1554,7 +1658,12 @@ def main(argv: list[str] | None = None) -> int:
                 "本編.txt に追記します。"
             )
 
-    stats = RunStats(news_enabled=args.news, plot_only=args.plot_only)
+    stats = RunStats(
+        news_enabled=args.news,
+        plot_only=args.plot_only,
+        no_shift=args.no_shift,
+        ending=args.ending,
+    )
     prompt_logger = PromptLogger(work_dir / "prompt", args.model)
     client = OllamaClient(
         url=args.url,
