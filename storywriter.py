@@ -7,17 +7,20 @@
   python storywriter.py novel.txt
   python storywriter.py novel.txt -n 6
   python storywriter.py novel.txt --url http://localhost:11434 --model llama3
+  python storywriter.py novel.txt --plot-only
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 import sys
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +46,11 @@ PREVIOUS_CONTEXT_SCENES = 5
 FUTURE_PLOT_COUNT = 3
 WORLDVIEW_UPDATE_INTERVAL = 5
 WORLDVIEW_REVIEW_CHARS = 6000
+NEWS_ITEM_LIMIT = 8
+NEWS_FETCH_TIMEOUT = 20
+NEWS_FEEDS = (
+    "https://assets.wor.jp/rss/rdf/maidona/new.rdf",
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_ROOT = SCRIPT_DIR / "output"
@@ -127,6 +135,12 @@ class PlotScene:
 
 
 @dataclass
+class NewsItem:
+    title: str
+    summary: str = ""
+
+
+@dataclass
 class RunStats:
     worldview_reused: bool = False
     plot_reused: bool = False
@@ -134,6 +148,9 @@ class RunStats:
     scene_chars: int = 0
     worldview_updates: int = 0
     plot_extensions: int = 0
+    news_enabled: bool = False
+    news_count: int = 0
+    plot_only: bool = False
     started_at: datetime = field(default_factory=datetime.now)
     started_mono: float = field(default_factory=time.monotonic)
 
@@ -653,6 +670,80 @@ def strip_repeated_source(scene: str, *contexts: str) -> str:
     return text.strip() or scene.strip()
 
 
+def _xml_local_name(tag: str) -> str:
+    return tag.split("}", 1)[-1].lower()
+
+
+def _parse_rss_items(raw: bytes) -> list[NewsItem]:
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return []
+    items: list[NewsItem] = []
+    for node in root.iter():
+        if _xml_local_name(node.tag) not in {"item", "entry"}:
+            continue
+        title = ""
+        summary = ""
+        for child in list(node):
+            name = _xml_local_name(child.tag)
+            text = (child.text or "").strip()
+            if not text:
+                continue
+            if name == "title":
+                title = html.unescape(text)
+            elif name in {"description", "summary"}:
+                cleaned = re.sub(r"<[^>]+>", "", text)
+                summary = html.unescape(cleaned).strip()
+        if title:
+            items.append(
+                NewsItem(
+                    title=title,
+                    summary=first_chars(summary, 120),
+                )
+            )
+    return items
+
+
+def fetch_recent_news(limit: int = NEWS_ITEM_LIMIT) -> list[NewsItem]:
+    """ニュースの公開 RSS から最近の見出しを取得する。"""
+    collected: list[NewsItem] = []
+    seen: set[str] = set()
+    for url in NEWS_FEEDS:
+        if len(collected) >= limit:
+            break
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "storywriter/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=NEWS_FETCH_TIMEOUT
+            ) as response:
+                raw = response.read()
+        except urllib.error.URLError as exc:
+            log(f"ニュース取得に失敗しました ({url}): {exc.reason}")
+            continue
+        for item in _parse_rss_items(raw):
+            if item.title in seen:
+                continue
+            seen.add(item.title)
+            collected.append(item)
+            if len(collected) >= limit:
+                break
+    return collected
+
+
+def format_news_digest(items: Iterable[NewsItem]) -> str:
+    lines: list[str] = []
+    for index, item in enumerate(items, 1):
+        if item.summary:
+            lines.append(f"{index}. {item.title} — {item.summary}")
+        else:
+            lines.append(f"{index}. {item.title}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # プロンプト
 # ---------------------------------------------------------------------------
@@ -711,9 +802,25 @@ def prompt_extract_past_scenes(
 """
 
 
-def prompt_next_plot(tail: str, plot: list[PlotScene], worldview: str) -> str:
+def prompt_next_plot(
+    tail: str,
+    plot: list[PlotScene],
+    worldview: str,
+    news_text: str = "",
+    expected: int = FUTURE_PLOT_COUNT,
+) -> str:
     plot_text = dump_plot(plot).strip()
-    return f"""既存の世界観・プロット・本文末尾を踏まえ、これから書く次のシーンを{FUTURE_PLOT_COUNT}つ作成してください。
+    news_block = ""
+    news_rules = ""
+    if news_text.strip():
+        news_block = f"\n# 最近の時事\n{news_text.strip()}\n"
+        news_rules = (
+            "- 時事の見出しをそのまま写さず、世界観に合う形で核だけを取り込む\n"
+            "- 新しいシーンの少なくとも1つに、時事から着想した要素を入れる\n"
+            "- 舞台が現代でない場合は、主題をその世界の事件・噂・制度に翻訳する\n"
+            "- 全シーンを報道の再現にしない\n"
+        )
+    return f"""既存の世界観・プロット・本文末尾を踏まえ、これから書く次のシーンを{expected}つ作成してください。
 これは長編小説の続きです。同じ場面を引き伸ばすのではなく、物語全体を前へ進めてください。
 
 # 世界観
@@ -724,14 +831,14 @@ def prompt_next_plot(tail: str, plot: list[PlotScene], worldview: str) -> str:
 
 # 本文末尾（すでに書かれている内容）
 {tail}
-
+{news_block}
 出力ルール:
-- {FUTURE_PLOT_COUNT}行だけ出力する
+- {expected}行だけ出力する
 - 1行1シーン、各シーン約{PLOT_SCENE_CHARS}字
 - 既存プロットの続きとして自然につながる
 - 本文末尾や既存シーンと同じ出来事・同じ会話・同じ状況の繰り返しは禁止
 - 同じ場所や同じやり取りが続きそうなら、時間経過・場所移動・新たな人物や事件で場面を切り替える
-- 見出し・番号・前置きは不要
+{news_rules}- 見出し・番号・前置きは不要
 - 思考過程、英語、特殊タグは出力しない
 - 各行の中に改行を入れない
 """
@@ -863,6 +970,7 @@ class StoryWriter:
         self.client = client
         self.work_dir = work_dir
         self.stats = stats if stats is not None else RunStats()
+        self.news_text = ""
         self.base_path = work_dir / "ベース.txt"
         self.worldview_path = work_dir / "世界観.txt"
         self.plot_path = work_dir / "プロット.txt"
@@ -925,7 +1033,7 @@ class StoryWriter:
         tail = last_chars(body)
         log("これからのシーンを作成しています...")
         future_lines = self._generate_plot_lines(
-            prompt_next_plot(tail, past, worldview),
+            prompt_next_plot(tail, past, worldview, self.news_text),
             expected=FUTURE_PLOT_COUNT,
             tail=tail,
             worldview=worldview,
@@ -1101,11 +1209,14 @@ class StoryWriter:
         plot: list[PlotScene],
         tail: str,
         worldview: str,
+        count: int = FUTURE_PLOT_COUNT,
     ) -> list[PlotScene]:
-        log("プロットの続き（次の3シーン）を作成しています...")
+        log(f"プロットの続き（次の{count}シーン）を作成しています...")
         lines = self._generate_plot_lines(
-            prompt_next_plot(tail, plot, worldview),
-            expected=FUTURE_PLOT_COUNT,
+            prompt_next_plot(
+                tail, plot, worldview, self.news_text, expected=count
+            ),
+            expected=count,
             tail=tail,
             worldview=worldview,
             create_label="プロット追加",
@@ -1117,6 +1228,29 @@ class StoryWriter:
         write_text(self.plot_path, dump_plot(plot))
         self.stats.plot_extensions += 1
         log("プロット.txt に次のシーンを追記しました。")
+        return plot
+
+    def add_upcoming_scenes(
+        self,
+        source: str,
+        worldview: str,
+        plot: list[PlotScene],
+        count: int,
+    ) -> list[PlotScene]:
+        """本編は書かず、これから書くシーンだけをプロットへ足す。"""
+        already = 0
+        if not self.stats.plot_reused:
+            already = FUTURE_PLOT_COUNT
+        remaining = max(0, count - already)
+        if remaining == 0:
+            log("本編は書かず、プロットの作成のみ行いました。")
+            return plot
+        log(f"本編は書かず、プロットに {remaining} シーン追加します。")
+        while remaining > 0:
+            batch = min(FUTURE_PLOT_COUNT, remaining)
+            tail = last_chars(combined_body(source, self.honpen_path))
+            plot = self.extend_plot(plot, tail, worldview, count=batch)
+            remaining -= batch
         return plot
 
     def write_scenes(
@@ -1191,7 +1325,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_SCENES,
         metavar="N",
-        help="本編.txt に作成するシーン数",
+        help=(
+            "本編.txt に作成するシーン数"
+            "（--plot-only 時はプロットへ追加するシーン数）"
+        ),
     )
     parser.add_argument(
         "--url",
@@ -1213,6 +1350,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--fresh",
         action="store_true",
         help="既存の世界観・プロット・本編を破棄して最初から生成する",
+    )
+    parser.add_argument(
+        "--news",
+        action="store_true",
+        help="ニュースを取得し、新しいプロットに時事ネタを織り込む",
+    )
+    parser.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="本編は書かず、プロットへこれから書くシーンだけを追加する",
     )
     args = parser.parse_args(argv)
     if args.scenes < 1:
@@ -1258,6 +1405,12 @@ def save_stats(
     plot_status = "再利用" if stats.plot_reused else "新規作成"
     if stats.plot_extensions:
         plot_status += f"（続きを{stats.plot_extensions}回追加）"
+    if stats.news_enabled and stats.news_count:
+        news_status = f"オン（{stats.news_count}件）"
+    elif stats.news_enabled:
+        news_status = "オン（取得失敗）"
+    else:
+        news_status = "オフ"
 
     history = ""
     if path.exists():
@@ -1278,6 +1431,7 @@ def save_stats(
         f"累計処理時間: {format_duration(total_seconds)}\n"
         f"累計処理時間秒: {int(round(total_seconds))}\n"
         f"最終実行: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"時事ネタ: {news_status}\n"
         f"最終結果: {'完了' if ok else 'エラー'}\n"
     )
     run = (
@@ -1291,6 +1445,8 @@ def save_stats(
         f"世界観: {worldview_status}\n"
         f"プロット: {plot_status}\n"
         f"世界観更新回数: {stats.worldview_updates}\n"
+        f"時事ネタ: {news_status}\n"
+        f"本編執筆: {'なし（プロットのみ）' if stats.plot_only else 'あり'}\n"
         f"保存したプロンプト数: {prompt_logger.saved}\n"
         f"結果: {'完了' if ok else 'エラー'}\n"
     )
@@ -1340,11 +1496,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     log(f"作業フォルダ: {work_dir}")
     log(f"モデル: {args.model}")
-    log(f"作成するシーン数: {args.scenes}")
+    if args.plot_only:
+        log(f"プロットへ追加するシーン数: {args.scenes}")
+    else:
+        log(f"作成するシーン数: {args.scenes}")
+    if args.news:
+        log("時事ネタモード: オン")
+    if args.plot_only:
+        log("プロットのみモード: 本編は書きません")
     if resuming:
-        log("同じ作品の続きです。既存の世界観・プロットを利用し、本編.txt に追記します。")
+        if args.plot_only:
+            log(
+                "同じ作品の続きです。既存の世界観を利用し、"
+                "プロット.txt にシーンを追加します。"
+            )
+        else:
+            log(
+                "同じ作品の続きです。既存の世界観・プロットを利用し、"
+                "本編.txt に追記します。"
+            )
 
-    stats = RunStats()
+    stats = RunStats(news_enabled=args.news, plot_only=args.plot_only)
     prompt_logger = PromptLogger(work_dir / "prompt", args.model)
     client = OllamaClient(
         url=args.url,
@@ -1353,6 +1525,21 @@ def main(argv: list[str] | None = None) -> int:
         prompt_logger=prompt_logger,
     )
     writer = StoryWriter(client, work_dir, stats)
+    if args.news:
+        log("最近のニュースを取得しています...")
+        news_items = fetch_recent_news()
+        stats.news_count = len(news_items)
+        if news_items:
+            digest = format_news_digest(news_items)
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            write_text(
+                work_dir / "時事.txt",
+                f"取得時刻: {stamp}\n\n{digest}\n",
+            )
+            writer.news_text = digest
+            log(f"時事ネタ {len(news_items)} 件をプロット作成に使います。")
+        else:
+            log("ニュースを取得できなかったため、時事ネタなしで続行します。")
     writer.sanitize_outputs()
 
     ok = False
@@ -1360,7 +1547,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         worldview = writer.ensure_worldview(source, force=args.fresh)
         plot = writer.ensure_plot(source, worldview, force=args.fresh)
-        writer.write_scenes(source, worldview, plot, args.scenes)
+        if args.plot_only:
+            plot = writer.add_upcoming_scenes(
+                source, worldview, plot, args.scenes
+            )
+        else:
+            writer.write_scenes(source, worldview, plot, args.scenes)
         ok = True
     except RuntimeError as exc:
         log(str(exc))
@@ -1377,7 +1569,10 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if ok:
-        log(f"完了しました: {writer.honpen_path}")
+        if args.plot_only:
+            log(f"完了しました: {writer.plot_path}")
+        else:
+            log(f"完了しました: {writer.honpen_path}")
         return 0
     return 1
 
