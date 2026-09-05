@@ -27,7 +27,9 @@ from typing import Iterable
 # 設定（CLI 引数で上書き可能）
 # ---------------------------------------------------------------------------
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_MODEL = "hf.co/bartowski/Ateron_Gemma-4-Novelist-Eclipse-31B-GGUF:Q4_K_M"
+DEFAULT_MODEL = (
+    "hf.co/bartowski/Ateron_Gemma-4-Novelist-Eclipse-31B-GGUF:Q4_K_M"
+)
 DEFAULT_SCENES = 3
 DEFAULT_TIMEOUT = 1800
 CHAR_WINDOW = 2000
@@ -59,10 +61,17 @@ _CHANNEL_START = re.compile(
     r"<\|channel\|?>?(?:thought|analysis|commentary)?",
     re.IGNORECASE,
 )
-_CHANNEL_END = re.compile(r"(?:<channel\|>|<\|channel\|>|<\|end\|>)", re.IGNORECASE)
-_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_CHANNEL_END = re.compile(
+    r"(?:<channel\|>|<\|channel\|>|<\|end\|>)",
+    re.IGNORECASE,
+)
+_THINK_BLOCK = re.compile(
+    r"<think>.*?</think>",
+    re.DOTALL | re.IGNORECASE,
+)
 _CHANNEL_BLOCK = re.compile(
-    r"<\|channel\|?>?(?:thought|analysis|commentary)?.*?(?:<channel\|>|<\|channel\|>|<\|end\|>)",
+    r"<\|channel\|?>?(?:thought|analysis|commentary)?.*?"
+    r"(?:<channel\|>|<\|channel\|>|<\|end\|>)",
     re.DOTALL | re.IGNORECASE,
 )
 _CHANNEL_SPLIT = re.compile(
@@ -144,7 +153,9 @@ def last_chars(text: str, n: int = CHAR_WINDOW) -> str:
 
 
 def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return path.read_text(encoding="utf-8").replace("\r\n", "\n").replace(
+        "\r", "\n"
+    )
 
 
 def write_text(path: Path, text: str) -> None:
@@ -175,7 +186,11 @@ def combined_body(base_text: str, honpen_path: Path) -> str:
 def split_honpen_scenes(text: str) -> list[str]:
     if not text.strip():
         return []
-    return [part.strip() for part in re.split(r"\n\s*\n", text.strip()) if part.strip()]
+    return [
+        part.strip()
+        for part in re.split(r"\n\s*\n", text.strip())
+        if part.strip()
+    ]
 
 
 def strip_code_fences(text: str) -> str:
@@ -207,7 +222,7 @@ def push_visible_stream(buf: str, in_thought: bool) -> tuple[str, str, bool]:
                 keep = _partial_tag_len(buf)
                 buf = buf[-keep:] if keep else buf[-48:]
                 break
-            buf = buf[match.end() :]
+            buf = buf[match.end():]
             in_thought = False
             continue
         match = _CHANNEL_START.search(buf)
@@ -221,8 +236,8 @@ def push_visible_stream(buf: str, in_thought: bool) -> tuple[str, str, bool]:
                 buf = ""
             break
         if match.start():
-            visible.append(buf[: match.start()])
-        buf = buf[match.end() :]
+            visible.append(buf[:match.start()])
+        buf = buf[match.end():]
         in_thought = True
     return "".join(visible), buf, in_thought
 
@@ -235,7 +250,10 @@ def strip_model_thought(text: str) -> str:
     while prev != text:
         prev = text
         text = _CHANNEL_BLOCK.sub("", text)
-    pieces = [_CHANNEL_START.sub("", p).strip() for p in _CHANNEL_SPLIT.split(text)]
+    pieces = [
+        _CHANNEL_START.sub("", part).strip()
+        for part in _CHANNEL_SPLIT.split(text)
+    ]
     kept = []
     for piece in pieces:
         piece = _CHANNEL_END.sub("", piece).strip()
@@ -307,7 +325,9 @@ class PromptLogger:
 
     def save(self, kind: str, prompt: str, system: str) -> Path:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        safe_kind = re.sub(r"[^\w一-龥ぁ-んァ-ンー]+", "_", kind).strip("_") or "prompt"
+        safe_kind = (
+            re.sub(r"[^\w一-龥ぁ-んァ-ンー]+", "_", kind).strip("_") or "prompt"
+        )
         path = self.prompt_dir / f"{self.index:03d}_{stamp}_{safe_kind}.txt"
         self.index += 1
         self.saved += 1
@@ -380,7 +400,9 @@ class OllamaClient:
         hold = ""
         in_thought = False
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout
+            ) as response:
                 for raw_line in response:
                     line = raw_line.decode("utf-8").strip()
                     if not line:
@@ -390,7 +412,9 @@ class OllamaClient:
                         raise RuntimeError(f"Ollama エラー: {data['error']}")
                     token = data.get("response", "")
                     chunks.append(token)
-                    visible, hold, in_thought = push_visible_stream(hold + token, in_thought)
+                    visible, hold, in_thought = push_visible_stream(
+                        hold + token, in_thought
+                    )
                     if show_stream and visible:
                         print(visible, end="", file=sys.stderr, flush=True)
                     if data.get("done"):
@@ -441,7 +465,9 @@ def parse_plot_file(text: str) -> list[PlotScene]:
         body = _LINE_PREFIX.sub("", line).strip()
         if not body:
             continue
-        scenes.append(PlotScene(text=body, done=done_mark, from_source=from_source))
+        scenes.append(
+            PlotScene(text=body, done=done_mark, from_source=from_source)
+        )
     if scenes and not saw_mark:
         for scene in scenes[:PAST_PLOT_COUNT]:
             scene.done = True
@@ -487,7 +513,11 @@ def plot_lines_usable(scenes: Iterable[PlotScene]) -> bool:
     if len(items) < 2:
         return False
     for scene in items:
-        if "\n" in scene.text or "<|channel" in scene.text or "<channel|" in scene.text:
+        if (
+            "\n" in scene.text
+            or "<|channel" in scene.text
+            or "<channel|" in scene.text
+        ):
             return False
         if not looks_japanese(scene.text):
             return False
@@ -507,7 +537,9 @@ def written_scene_count(plot: Iterable[PlotScene]) -> int:
     return sum(1 for scene in plot if scene.done and not scene.from_source)
 
 
-def windows_from_end(text: str, size: int = CHAR_WINDOW) -> list[tuple[int, int, str]]:
+def windows_from_end(
+    text: str, size: int = CHAR_WINDOW
+) -> list[tuple[int, int, str]]:
     """末尾から size 字ずつ遡った断片。先頭が最も新しい末尾。"""
     windows: list[tuple[int, int, str]] = []
     end = len(text)
@@ -531,7 +563,7 @@ def _char_ngrams(text: str, size: int = 3) -> set[str]:
     compact = re.sub(r"\s+", "", text)
     if len(compact) < size:
         return {compact} if compact else set()
-    return {compact[i : i + size] for i in range(len(compact) - size + 1)}
+    return {compact[i:i + size] for i in range(len(compact) - size + 1)}
 
 
 def plot_similarity(left: str, right: str) -> float:
@@ -551,14 +583,21 @@ def plot_coverage(summary: str, source: str) -> float:
     return len(grams & source_grams) / len(grams)
 
 
-def is_duplicate_plot(candidate: str, existing: Iterable[PlotScene | str], threshold: float = 0.42) -> bool:
-    texts = [item.text if isinstance(item, PlotScene) else item for item in existing]
+def is_duplicate_plot(
+    candidate: str,
+    existing: Iterable[PlotScene | str],
+    threshold: float = 0.42,
+) -> bool:
+    texts = [
+        item.text if isinstance(item, PlotScene) else item for item in existing
+    ]
     for text in texts:
         if not text.strip():
             continue
         if plot_similarity(candidate, text) >= threshold:
             return True
-        if len(text) > len(candidate) * 2 and plot_coverage(candidate, text) >= 0.5:
+        long_source = len(text) > len(candidate) * 2
+        if long_source and plot_coverage(candidate, text) >= 0.5:
             return True
     return False
 
@@ -588,7 +627,9 @@ def strip_repeated_source(scene: str, *contexts: str) -> str:
         return text
 
     ctx_compact = re.sub(r"\s+", "", combined)
-    paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
+    paragraphs = [
+        part.strip() for part in re.split(r"\n{2,}", text) if part.strip()
+    ]
     kept: list[str] = []
     skipping = True
     for paragraph in paragraphs:
@@ -777,7 +818,10 @@ def prompt_write_scene(
     target: PlotScene,
     tail: str,
 ) -> str:
-    prev_text = "\n".join(f"- {scene.text}" for scene in prev) if prev else "- （冒頭のため直前シーンなし）"
+    if prev:
+        prev_text = "\n".join(f"- {scene.text}" for scene in prev)
+    else:
+        prev_text = "- （冒頭のため直前シーンなし）"
     return f"""以下の情報を踏まえ、指定されたシーンの「新しい本文」だけを執筆してください。
 
 # 世界観
@@ -862,14 +906,19 @@ class StoryWriter:
         log(f"世界観.txt を保存しました（{len(worldview)} 字）。")
         return worldview
 
-    def ensure_plot(self, source: str, worldview: str, force: bool) -> list[PlotScene]:
+    def ensure_plot(
+        self, source: str, worldview: str, force: bool
+    ) -> list[PlotScene]:
         if self.plot_path.exists() and not force:
             scenes = parse_plot_file(read_text(self.plot_path))
             if plot_lines_usable(scenes):
                 log("既存の プロット.txt を再利用します。")
                 self.stats.plot_reused = True
                 return scenes
-            log("プロット.txt の形式が不正なため、本文末尾から作り直します（本編は保持します）。")
+            log(
+                "プロット.txt の形式が不正なため、"
+                "本文末尾から作り直します（本編は保持します）。"
+            )
 
         body = combined_body(source, self.honpen_path)
         past = self._extract_source_plot(body, worldview)
@@ -884,7 +933,9 @@ class StoryWriter:
             past_count=0,
             existing=past,
         )
-        plot = past + [PlotScene(text=line, done=False) for line in future_lines]
+        plot = past + [
+            PlotScene(text=line, done=False) for line in future_lines
+        ]
         write_text(self.plot_path, dump_plot(plot))
         log(
             f"プロット.txt を保存しました"
@@ -893,7 +944,9 @@ class StoryWriter:
         )
         return plot
 
-    def _extract_source_plot(self, source: str, worldview: str) -> list[PlotScene]:
+    def _extract_source_plot(
+        self, source: str, worldview: str
+    ) -> list[PlotScene]:
         windows = windows_from_end(source)
         if not windows:
             return []
@@ -917,13 +970,17 @@ class StoryWriter:
                 worldview=worldview,
                 create_label=f"既出プロット_{index + 1}",
                 past_count=expected,
-                existing=[PlotScene(text=item, done=True, from_source=True) for item in later],
+                existing=[
+                    PlotScene(text=item, done=True, from_source=True)
+                    for item in later
+                ],
             )
             groups.append(lines)
             later = lines + later
         chronological = [line for group in reversed(groups) for line in group]
         return [
-            PlotScene(text=line, done=True, from_source=True) for line in chronological
+            PlotScene(text=line, done=True, from_source=True)
+            for line in chronological
         ]
 
     def _generate_plot_lines(
@@ -940,11 +997,17 @@ class StoryWriter:
         existing_list = list(existing or [])
         current_prompt = prompt
         for attempt in range(1, 4):
+            retry_label = f"{create_label}_再試行{attempt}"
             raw = self.client.generate(
                 current_prompt,
                 temperature=0.35 + 0.1 * (attempt - 1),
                 num_predict=1024,
-                label=create_label if attempt == 1 else f"{create_label}_再試行{attempt}",
+                label=create_label if attempt == 1 else retry_label,
+            )
+            format_label = (
+                "プロット整形"
+                if attempt == 1
+                else f"プロット整形_再試行{attempt}"
             )
             formatted = self.client.generate(
                 prompt_normalize_plot(
@@ -956,13 +1019,16 @@ class StoryWriter:
                 ),
                 temperature=0.2,
                 num_predict=1024,
-                label="プロット整形" if attempt == 1 else f"プロット整形_再試行{attempt}",
+                label=format_label,
             )
             lines = extract_scene_lines(formatted, expected)
             if len(lines) < expected:
                 lines = extract_scene_lines(raw, expected)
             if len(lines) >= expected:
-                lines = [re.sub(r"\s+", " ", line).strip() for line in lines[:expected]]
+                lines = [
+                    re.sub(r"\s+", " ", line).strip()
+                    for line in lines[:expected]
+                ]
                 duplicated = existing_list and any(
                     is_duplicate_plot(line, existing_list) for line in lines
                 )
@@ -978,23 +1044,35 @@ class StoryWriter:
                     if past_count >= expected:
                         current_prompt = (
                             prompt
-                            + "\n\n【再出力】後続シーンと重複せず、この断片に書かれている出来事だけを時系列で出力すること。"
+                            + "\n\n【再出力】後続シーンと重複せず、"
+                            "この断片に書かれている出来事だけを"
+                            "時系列で出力すること。"
                         )
                     else:
                         current_prompt = (
                             prompt
-                            + "\n\n【重要】新しいシーンが既存の本文・プロットと同じ状況に寄っています。"
-                            "場所・時間・相手・目的のいずれかを変えて場面転換し、まだ書かれていない展開だけを書いてください。"
+                            + "\n\n【重要】新しいシーンが既存の本文・"
+                            "プロットと同じ状況に寄っています。"
+                            "場所・時間・相手・目的のいずれかを変えて"
+                            "場面転換し、まだ書かれていない展開だけを"
+                            "書いてください。"
                         )
                     continue
                 return lines
             last_error = f"{len(lines)} 行しか得られませんでした"
             log(f"プロットの行数が足りません（{last_error}）。再試行 {attempt}/3")
-            current_prompt = prompt + "\n\n【再出力】指定行数だけ、1行1シーンの日本語で出力すること。"
+            current_prompt = (
+                prompt
+                + "\n\n【再出力】指定行数だけ、1行1シーンの日本語で"
+                "出力すること。"
+            )
         raise RuntimeError(f"プロットの生成に失敗しました: {last_error}")
 
     def refresh_worldview(self, worldview: str) -> str:
-        honpen = read_text(self.honpen_path) if self.honpen_path.exists() else ""
+        if self.honpen_path.exists():
+            honpen = read_text(self.honpen_path)
+        else:
+            honpen = ""
         recent = split_honpen_scenes(honpen)[-WORLDVIEW_UPDATE_INTERVAL:]
         excerpt = last_chars("\n\n".join(recent), WORLDVIEW_REVIEW_CHARS)
         if not excerpt.strip():
@@ -1049,11 +1127,15 @@ class StoryWriter:
         count: int,
     ) -> None:
         for i in range(1, count + 1):
-            pending_indexes = [idx for idx, scene in enumerate(plot) if not scene.done]
+            pending_indexes = [
+                idx for idx, scene in enumerate(plot) if not scene.done
+            ]
             if not pending_indexes:
                 tail = last_chars(combined_body(source, self.honpen_path))
                 plot = self.extend_plot(plot, tail, worldview)
-                pending_indexes = [idx for idx, scene in enumerate(plot) if not scene.done]
+                pending_indexes = [
+                    idx for idx, scene in enumerate(plot) if not scene.done
+                ]
                 if not pending_indexes:
                     raise RuntimeError("追加プロットを作成できませんでした。")
 
@@ -1073,7 +1155,9 @@ class StoryWriter:
                 clean_llm_text(raw),
                 source,
                 tail,
-                read_text(self.honpen_path) if self.honpen_path.exists() else "",
+                read_text(self.honpen_path)
+                if self.honpen_path.exists()
+                else "",
             )
             if not scene_text:
                 raise RuntimeError("シーン本文が空でした。")
@@ -1086,7 +1170,8 @@ class StoryWriter:
             log(f"本編.txt に追記しました（{len(scene_text)} 字）。")
 
             done_written = written_scene_count(plot)
-            if done_written > 0 and done_written % WORLDVIEW_UPDATE_INTERVAL == 0:
+            interval = WORLDVIEW_UPDATE_INTERVAL
+            if done_written > 0 and done_written % interval == 0:
                 worldview = self.refresh_worldview(worldview)
 
 
@@ -1179,7 +1264,10 @@ def save_stats(
         existing = read_text(path)
         mark = "===== 実行履歴 ====="
         idx = existing.find(mark)
-        history = existing[idx + len(mark) :].strip() if idx != -1 else existing.strip()
+        if idx != -1:
+            history = existing[idx + len(mark):].strip()
+        else:
+            history = existing.strip()
 
     header = (
         f"入力ファイル: {input_path}\n"
@@ -1211,7 +1299,11 @@ def save_stats(
         body += history.rstrip() + "\n\n"
     body += run
     write_text(path, body)
-    log(f"統計.txt を保存しました（今回 {stats.scenes_written} シーン / {format_duration(elapsed)}）。")
+    duration = format_duration(elapsed)
+    log(
+        f"統計.txt を保存しました"
+        f"（今回 {stats.scenes_written} シーン / {duration}）。"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
