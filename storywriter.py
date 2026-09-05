@@ -15,9 +15,11 @@ import argparse
 import json
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -104,6 +106,21 @@ class PlotScene:
     def to_line(self) -> str:
         mark = DONE_MARK if self.done else PENDING_MARK
         return f"{mark} {self.text}"
+
+
+@dataclass
+class RunStats:
+    worldview_reused: bool = False
+    plot_reused: bool = False
+    scenes_written: int = 0
+    scene_chars: int = 0
+    worldview_updates: int = 0
+    plot_extensions: int = 0
+    started_at: datetime = field(default_factory=datetime.now)
+    started_mono: float = field(default_factory=time.monotonic)
+
+    def elapsed_seconds(self) -> float:
+        return max(0.0, time.monotonic() - self.started_mono)
 
 
 # ---------------------------------------------------------------------------
@@ -240,14 +257,81 @@ def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def format_duration(seconds: float) -> str:
+    total = int(round(max(0.0, seconds)))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}時間{minutes}分{secs}秒"
+    if minutes:
+        return f"{minutes}分{secs}秒"
+    return f"{secs}秒"
+
+
+def read_stats_field(path: Path, key: str) -> str:
+    if not path.exists():
+        return ""
+    prefix = f"{key}:"
+    for line in read_text(path).splitlines():
+        if line.startswith(prefix):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+class PromptLogger:
+    """AI に渡したプロンプトを prompt/ へ 1 件 1 ファイルで保存する。"""
+
+    def __init__(self, prompt_dir: Path, model: str) -> None:
+        self.prompt_dir = prompt_dir
+        self.model = model
+        self.prompt_dir.mkdir(parents=True, exist_ok=True)
+        self.index = self._next_index()
+        self.saved = 0
+
+    def _next_index(self) -> int:
+        numbers = []
+        for path in self.prompt_dir.glob("*.txt"):
+            match = re.match(r"^(\d+)_", path.name)
+            if match:
+                numbers.append(int(match.group(1)))
+        return max(numbers, default=0) + 1
+
+    def save(self, kind: str, prompt: str, system: str) -> Path:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_kind = re.sub(r"[^\w一-龥ぁ-んァ-ンー]+", "_", kind).strip("_") or "prompt"
+        path = self.prompt_dir / f"{self.index:03d}_{stamp}_{safe_kind}.txt"
+        self.index += 1
+        self.saved += 1
+        body = (
+            f"種別: {kind}\n"
+            f"時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"モデル: {self.model}\n"
+            f"\n"
+            f"-------- system --------\n"
+            f"{system.strip()}\n"
+            f"\n"
+            f"-------- prompt --------\n"
+            f"{prompt.rstrip()}\n"
+        )
+        write_text(path, body)
+        return path
+
+
 # ---------------------------------------------------------------------------
 # Ollama クライアント
 # ---------------------------------------------------------------------------
 class OllamaClient:
-    def __init__(self, url: str, model: str, timeout: int) -> None:
+    def __init__(
+        self,
+        url: str,
+        model: str,
+        timeout: int,
+        prompt_logger: PromptLogger | None = None,
+    ) -> None:
         self.url = url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.prompt_logger = prompt_logger
 
     def generate(
         self,
@@ -258,7 +342,10 @@ class OllamaClient:
         num_predict: int = 2048,
         num_ctx: int = 8192,
         show_stream: bool = True,
+        label: str = "generate",
     ) -> str:
+        if self.prompt_logger is not None:
+            self.prompt_logger.save(label, prompt, system)
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -397,6 +484,96 @@ def previous_scenes(plot: list[PlotScene], target_index: int, count: int = PAST_
     return plot[start:target_index]
 
 
+def _char_ngrams(text: str, size: int = 3) -> set[str]:
+    compact = re.sub(r"\s+", "", text)
+    if len(compact) < size:
+        return {compact} if compact else set()
+    return {compact[i : i + size] for i in range(len(compact) - size + 1)}
+
+
+def plot_similarity(left: str, right: str) -> float:
+    grams_left = _char_ngrams(left)
+    grams_right = _char_ngrams(right)
+    if not grams_left or not grams_right:
+        return 0.0
+    return len(grams_left & grams_right) / len(grams_left | grams_right)
+
+
+def plot_coverage(summary: str, source: str) -> float:
+    """短いシーン説明が、長い本文の言い換えになっていないかを見る。"""
+    grams = _char_ngrams(summary)
+    source_grams = _char_ngrams(source)
+    if not grams:
+        return 0.0
+    return len(grams & source_grams) / len(grams)
+
+
+def is_duplicate_plot(candidate: str, existing: Iterable[PlotScene | str], threshold: float = 0.42) -> bool:
+    texts = [item.text if isinstance(item, PlotScene) else item for item in existing]
+    for text in texts:
+        if not text.strip():
+            continue
+        if plot_similarity(candidate, text) >= threshold:
+            return True
+        if len(text) > len(candidate) * 2 and plot_coverage(candidate, text) >= 0.5:
+            return True
+    return False
+
+
+def is_duplicate_plot(candidate: str, existing: Iterable[PlotScene | str], threshold: float = 0.42) -> bool:
+    texts = [item.text if isinstance(item, PlotScene) else item for item in existing]
+    return any(plot_similarity(candidate, text) >= threshold for text in texts if text.strip())
+
+
+def future_plots_stale(
+    lines: list[str],
+    *,
+    past_count: int,
+    existing: Iterable[PlotScene],
+    tail: str,
+) -> bool:
+    future = lines[past_count:]
+    if not future:
+        return False
+    compared: list[PlotScene | str] = list(existing)
+    compared.extend(lines[:past_count])
+    if tail.strip():
+        compared.append(tail)
+    return any(is_duplicate_plot(item, compared) for item in future)
+
+
+def strip_repeated_source(scene: str, *contexts: str) -> str:
+    """本編出力の先頭から、ベースや直前本文の再利用を取り除く。"""
+    text = scene.strip()
+    combined = "\n".join(part for part in contexts if part and part.strip())
+    if not text or not combined:
+        return text
+
+    ctx_compact = re.sub(r"\s+", "", combined)
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
+    kept: list[str] = []
+    skipping = True
+    for paragraph in paragraphs:
+        compact = re.sub(r"\s+", "", paragraph)
+        if skipping and len(compact) >= 30 and compact in ctx_compact:
+            continue
+        skipping = False
+        kept.append(paragraph)
+    if kept:
+        text = "\n\n".join(kept)
+
+    max_check = min(len(text), 400)
+    overlap = 0
+    for length in range(max_check, 24, -1):
+        prefix = text[:length]
+        if prefix in combined or combined.endswith(prefix):
+            overlap = length
+            break
+    if overlap:
+        text = text[overlap:].lstrip("\n　 ")
+    return text.strip() or scene.strip()
+
+
 # ---------------------------------------------------------------------------
 # プロンプト
 # ---------------------------------------------------------------------------
@@ -422,42 +599,51 @@ def prompt_worldview(head: str) -> str:
 """
 
 
-def prompt_initial_plot(tail: str) -> str:
-    return f"""次の小説本文の末尾を読み、プロットを作成してください。
+def prompt_initial_plot(tail: str, worldview: str) -> str:
+    return f"""次の小説の世界観と本文末尾を読み、プロットを作成してください。
+
+# 世界観
+{worldview.strip()}
+
+# 本文末尾（ここまでが既に書かれている。ベース本文）
+{tail}
 
 出力ルール:
 - 合計{PAST_PLOT_COUNT + FUTURE_PLOT_COUNT}行だけ出力する
 - 1行1シーン、各シーン約{PLOT_SCENE_CHARS}字
-- 最初の{PAST_PLOT_COUNT}行は「これまでのシーン」（直近で起きた出来事）
-- 残りの{FUTURE_PLOT_COUNT}行は「これからのシーン」（自然な続き）
+- 最初の{PAST_PLOT_COUNT}行は「これまでのシーン」。本文末尾にすでに起きている直近の出来事だけを要約する
+- 残りの{FUTURE_PLOT_COUNT}行は「これからのシーン」。本文の最後の文の「その後」に起きる、まだ書かれていない新しい展開だけを書く
+- これからのシーンは、本文末尾の言い換え・繰り返し・同じ場面の延長であってはならない
+- これからのシーンでは、時間・場所・相手・目的の少なくとも一つを進めて、物語を先へ動かす
 - 見出し・番号・前置きは不要。シーンの説明文だけを1行ずつ書く
-- これからのシーンは、末尾の状況から無理なく続く展開にする
 - 思考過程、英語、特殊タグは出力しない
 - 各行の中に改行を入れない
-
---- 本文末尾 ---
-{tail}
 """
 
 
-def prompt_next_plot(tail: str, plot: list[PlotScene]) -> str:
+def prompt_next_plot(tail: str, plot: list[PlotScene], worldview: str) -> str:
     plot_text = dump_plot(plot).strip()
-    return f"""既存のプロットと本文末尾を踏まえ、これから書く次のシーンを{FUTURE_PLOT_COUNT}つ作成してください。
+    return f"""既存の世界観・プロット・本文末尾を踏まえ、これから書く次のシーンを{FUTURE_PLOT_COUNT}つ作成してください。
+これは長編小説の続きです。同じ場面を引き伸ばすのではなく、物語全体を前へ進めてください。
+
+# 世界観
+{worldview.strip()}
+
+# 既存プロット
+{plot_text}
+
+# 本文末尾（すでに書かれている内容）
+{tail}
 
 出力ルール:
 - {FUTURE_PLOT_COUNT}行だけ出力する
 - 1行1シーン、各シーン約{PLOT_SCENE_CHARS}字
 - 既存プロットの続きとして自然につながる
-- 既存シーンの繰り返しは禁止
+- 本文末尾や既存シーンと同じ出来事・同じ会話・同じ状況の繰り返しは禁止
+- 同じ場所や同じやり取りが続きそうなら、時間経過・場所移動・新たな人物や事件で場面を切り替える
 - 見出し・番号・前置きは不要
 - 思考過程、英語、特殊タグは出力しない
 - 各行の中に改行を入れない
-
---- 既存プロット ---
-{plot_text}
-
---- 本文末尾 ---
-{tail}
 """
 
 
@@ -492,8 +678,23 @@ def prompt_update_worldview(worldview: str, honpen_excerpt: str) -> str:
 """
 
 
-def prompt_normalize_plot(raw: str, expected: int, tail: str) -> str:
-    return f"""次のテキストは小説のシーン説明です。内容を保ったまま、指定形式へ加工してください。
+def prompt_normalize_plot(
+    raw: str,
+    expected: int,
+    tail: str,
+    worldview: str,
+    past_count: int = 0,
+) -> str:
+    if past_count > 0:
+        split_rule = (
+            f"- 最初の{past_count}行は、本文末尾にすでに書かれている出来事の要約\n"
+            f"- 残りの{expected - past_count}行は、本文にも既存プロットの既出部分にも無い、新しい続き"
+        )
+    else:
+        split_rule = (
+            f"- {expected}行すべてが、本文末尾や既存シーンにまだ書かれていない新しい展開"
+        )
+    return f"""次のテキストは小説のシーン説明です。世界観と本文末尾を参照し、指定形式へ加工してください。
 
 形式:
 - ちょうど{expected}行だけ出力する
@@ -502,12 +703,16 @@ def prompt_normalize_plot(raw: str, expected: int, tail: str) -> str:
 - 各行は日本語のみで、約{PLOT_SCENE_CHARS}字のシーン説明にする
 - 番号、箇条書き記号、見出し、英語、思考過程、特殊タグは付けない
 - 前置きと後書きは禁止
-- 元テキストが英語のメモや思考過程でも、参考本文から読み取れる出来事を日本語のシーン説明に直す
+{split_rule}
+- 新しいシーンは本文末尾の言い換えにしない。必要なら場所・時間・相手を切り替えて物語を進める
 
---- 参考にする本文末尾 ---
+# 世界観
+{worldview.strip()}
+
+# 本文末尾（既に書かれている）
 {tail}
 
---- 加工するテキスト ---
+# 加工するテキスト
 {raw}
 """
 
@@ -519,7 +724,7 @@ def prompt_write_scene(
     tail: str,
 ) -> str:
     prev_text = "\n".join(f"- {scene.text}" for scene in prev) if prev else "- （冒頭のため直前シーンなし）"
-    return f"""以下の情報を踏まえ、指定されたシーンの本文を執筆してください。
+    return f"""以下の情報を踏まえ、指定されたシーンの「新しい本文」だけを執筆してください。
 
 # 世界観
 {worldview.strip()}
@@ -530,14 +735,17 @@ def prompt_write_scene(
 # 今回執筆するシーン
 - {target.text}
 
-# 直前の本文（末尾）
+# 直前の本文（参照用。出力に含めない）
 {tail}
 
 執筆ルール:
-- 直前の本文の自然な続きとして書く（本文の繰り返しは禁止）
+- 出力は新しいシーンの本文のみ。直前の本文やベース本文をコピー・再掲・要約し直して書き始めない
+- 直前の最後の文の「次の瞬間」から書き始める
 - 今回のシーンで起きるべき出来事を、小説の地の文と会話で描く
 - 分量は約{SCENE_TARGET_CHARS}字を基本とする
 - 対立、告白、暴力、重要な選択など物語が盛り上がる場面では、必要に応じて約{SCENE_CLIMAX_CHARS}字まで伸ばしてよい
+- 同じ会話、同じ場所、同じ心情描写の繰り返しになったら、時間経過や場所移動で場面を切り替えて先へ進める
+- 長編の一場面として、そのシーンで状況が少しでも前に進むように書く
 - 日本語として破綻なく、そのシーンとして完結する形で終わる（文の途中で切らない）
 - タイトル、シーン番号、解説、メタ情報、思考過程、特殊タグは出力しない
 - 本文のみを日本語で出力する
@@ -548,13 +756,21 @@ def prompt_write_scene(
 # 執筆ワークフロー
 # ---------------------------------------------------------------------------
 class StoryWriter:
-    def __init__(self, client: OllamaClient, work_dir: Path) -> None:
+    def __init__(
+        self,
+        client: OllamaClient,
+        work_dir: Path,
+        stats: RunStats | None = None,
+    ) -> None:
         self.client = client
         self.work_dir = work_dir
+        self.stats = stats if stats is not None else RunStats()
         self.base_path = work_dir / "ベース.txt"
         self.worldview_path = work_dir / "世界観.txt"
         self.plot_path = work_dir / "プロット.txt"
         self.honpen_path = work_dir / "本編.txt"
+        self.stats_path = work_dir / "統計.txt"
+        self.prompt_dir = work_dir / "prompt"
 
     def sanitize_outputs(self) -> None:
         for path in (self.worldview_path, self.honpen_path):
@@ -570,8 +786,10 @@ class StoryWriter:
         if self.worldview_path.exists() and not force:
             text = clean_llm_text(read_text(self.worldview_path))
             if looks_japanese(text):
-                write_text(self.worldview_path, text)
+                if text != read_text(self.worldview_path).strip():
+                    write_text(self.worldview_path, text)
                 log("既存の 世界観.txt を再利用します。")
+                self.stats.worldview_reused = True
                 return text
             log("世界観.txt が不正なため再生成します。")
 
@@ -581,6 +799,7 @@ class StoryWriter:
             prompt_worldview(head),
             temperature=0.4,
             num_predict=2048,
+            label="世界観抽出",
         )
         worldview = clean_llm_text(raw)
         if not worldview:
@@ -589,21 +808,26 @@ class StoryWriter:
         log(f"世界観.txt を保存しました（{len(worldview)} 字）。")
         return worldview
 
-    def ensure_plot(self, source: str, force: bool) -> list[PlotScene]:
+    def ensure_plot(self, source: str, worldview: str, force: bool) -> list[PlotScene]:
         if self.plot_path.exists() and not force:
             scenes = parse_plot_file(read_text(self.plot_path))
             if plot_lines_usable(scenes):
                 log("既存の プロット.txt を再利用します。")
+                self.stats.plot_reused = True
                 return scenes
-            log("プロット.txt の形式が不正なため再生成します。")
+            log("プロット.txt の形式が不正なため、本文末尾から作り直します（本編は保持します）。")
 
-        tail = last_chars(source)
+        tail = last_chars(combined_body(source, self.honpen_path))
         log(f"プロットを作成しています（末尾 {len(tail)} 字）...")
         expected = PAST_PLOT_COUNT + FUTURE_PLOT_COUNT
         lines = self._generate_plot_lines(
-            prompt_initial_plot(tail),
+            prompt_initial_plot(tail, worldview),
             expected=expected,
             tail=tail,
+            worldview=worldview,
+            create_label="プロット作成",
+            past_count=PAST_PLOT_COUNT,
+            existing=[],
         )
         plot = [
             PlotScene(text=line, done=(i < PAST_PLOT_COUNT))
@@ -613,26 +837,61 @@ class StoryWriter:
         log("プロット.txt を保存しました。")
         return plot
 
-    def _generate_plot_lines(self, prompt: str, expected: int, tail: str) -> list[str]:
+    def _generate_plot_lines(
+        self,
+        prompt: str,
+        expected: int,
+        tail: str,
+        worldview: str,
+        create_label: str = "プロット作成",
+        past_count: int = 0,
+        existing: Iterable[PlotScene] | None = None,
+    ) -> list[str]:
         last_error = ""
+        existing_list = list(existing or [])
+        current_prompt = prompt
         for attempt in range(1, 4):
             raw = self.client.generate(
-                prompt if attempt == 1 else prompt + "\n\n【再出力】指定行数だけ、1行1シーンの日本語で出力すること。",
+                current_prompt,
                 temperature=0.35 + 0.1 * (attempt - 1),
                 num_predict=1024,
+                label=create_label if attempt == 1 else f"{create_label}_再試行{attempt}",
             )
             formatted = self.client.generate(
-                prompt_normalize_plot(raw, expected, tail),
+                prompt_normalize_plot(
+                    raw,
+                    expected,
+                    tail,
+                    worldview,
+                    past_count=past_count,
+                ),
                 temperature=0.2,
                 num_predict=1024,
+                label="プロット整形" if attempt == 1 else f"プロット整形_再試行{attempt}",
             )
             lines = extract_scene_lines(formatted, expected)
             if len(lines) < expected:
                 lines = extract_scene_lines(raw, expected)
             if len(lines) >= expected:
-                return [re.sub(r"\s+", " ", line).strip() for line in lines[:expected]]
+                lines = [re.sub(r"\s+", " ", line).strip() for line in lines[:expected]]
+                if future_plots_stale(
+                    lines,
+                    past_count=past_count,
+                    existing=existing_list,
+                    tail=tail,
+                ):
+                    last_error = "新しいシーンが既存内容と重複しています"
+                    log(f"{last_error}。場面転換して再試行 {attempt}/3")
+                    current_prompt = (
+                        prompt
+                        + "\n\n【重要】新しいシーンが既存の本文・プロットと同じ状況に寄っています。"
+                        "場所・時間・相手・目的のいずれかを変えて場面転換し、まだ書かれていない展開だけを書いてください。"
+                    )
+                    continue
+                return lines
             last_error = f"{len(lines)} 行しか得られませんでした"
             log(f"プロットの行数が足りません（{last_error}）。再試行 {attempt}/3")
+            current_prompt = prompt + "\n\n【再出力】指定行数だけ、1行1シーンの日本語で出力すること。"
         raise RuntimeError(f"プロットの生成に失敗しました: {last_error}")
 
     def refresh_worldview(self, worldview: str) -> str:
@@ -648,6 +907,7 @@ class StoryWriter:
             temperature=0.3,
             num_predict=2048,
             num_ctx=16384,
+            label="世界観更新",
         )
         updated = clean_llm_text(raw)
         if not updated or re.fullmatch(r"(更新なし|変更なし|追記なし)[。．]?", updated):
@@ -655,19 +915,30 @@ class StoryWriter:
             return worldview
 
         write_text(self.worldview_path, updated)
+        self.stats.worldview_updates += 1
         log(f"世界観.txt を更新しました（{len(updated)} 字）。")
         return updated
 
-    def extend_plot(self, plot: list[PlotScene], tail: str) -> list[PlotScene]:
+    def extend_plot(
+        self,
+        plot: list[PlotScene],
+        tail: str,
+        worldview: str,
+    ) -> list[PlotScene]:
         log("プロットの続き（次の3シーン）を作成しています...")
         lines = self._generate_plot_lines(
-            prompt_next_plot(tail, plot),
+            prompt_next_plot(tail, plot, worldview),
             expected=FUTURE_PLOT_COUNT,
             tail=tail,
+            worldview=worldview,
+            create_label="プロット追加",
+            past_count=0,
+            existing=plot,
         )
         new_scenes = [PlotScene(text=line, done=False) for line in lines]
         plot.extend(new_scenes)
         write_text(self.plot_path, dump_plot(plot))
+        self.stats.plot_extensions += 1
         log("プロット.txt に次のシーンを追記しました。")
         return plot
 
@@ -682,7 +953,7 @@ class StoryWriter:
             pending_indexes = [idx for idx, scene in enumerate(plot) if not scene.done]
             if not pending_indexes:
                 tail = last_chars(combined_body(source, self.honpen_path))
-                plot = self.extend_plot(plot, tail)
+                plot = self.extend_plot(plot, tail, worldview)
                 pending_indexes = [idx for idx, scene in enumerate(plot) if not scene.done]
                 if not pending_indexes:
                     raise RuntimeError("追加プロットを作成できませんでした。")
@@ -697,18 +968,26 @@ class StoryWriter:
                 prompt_write_scene(worldview, prev, target, tail),
                 temperature=0.85,
                 num_predict=4096,
+                label=f"シーン執筆_{i}",
             )
-            scene_text = clean_llm_text(raw)
+            scene_text = strip_repeated_source(
+                clean_llm_text(raw),
+                source,
+                tail,
+                read_text(self.honpen_path) if self.honpen_path.exists() else "",
+            )
             if not scene_text:
                 raise RuntimeError("シーン本文が空でした。")
 
             append_scene(self.honpen_path, scene_text)
             target.done = True
             write_text(self.plot_path, dump_plot(plot))
+            self.stats.scenes_written += 1
+            self.stats.scene_chars += len(scene_text)
             log(f"本編.txt に追記しました（{len(scene_text)} 字）。")
 
-            honpen_count = len(split_honpen_scenes(read_text(self.honpen_path)))
-            if honpen_count % WORLDVIEW_UPDATE_INTERVAL == 0:
+            done_written = max(0, sum(1 for scene in plot if scene.done) - PAST_PLOT_COUNT)
+            if done_written > 0 and done_written % WORLDVIEW_UPDATE_INTERVAL == 0:
                 worldview = self.refresh_worldview(worldview)
 
 
@@ -757,6 +1036,85 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def save_stats(
+    path: Path,
+    *,
+    input_path: Path,
+    work_dir: Path,
+    args: argparse.Namespace,
+    stats: RunStats,
+    prompt_logger: PromptLogger,
+    ok: bool,
+    plot: list[PlotScene] | None = None,
+) -> None:
+    elapsed = stats.elapsed_seconds()
+    prev_scenes = 0
+    if not args.fresh:
+        raw_scenes = read_stats_field(path, "本編の累計シーン数")
+        try:
+            prev_scenes = int(raw_scenes)
+        except ValueError:
+            prev_scenes = 0
+    raw_seconds = read_stats_field(path, "累計処理時間秒")
+    try:
+        prev_seconds = float(raw_seconds)
+    except ValueError:
+        prev_seconds = 0.0
+    plot_total = 0
+    if plot:
+        plot_total = max(0, sum(1 for scene in plot if scene.done) - PAST_PLOT_COUNT)
+    total_scenes = prev_scenes + stats.scenes_written
+    if not args.fresh:
+        total_scenes = max(total_scenes, plot_total)
+    else:
+        total_scenes = stats.scenes_written
+    total_seconds = prev_seconds + elapsed
+
+    worldview_status = "再利用" if stats.worldview_reused else "新規作成"
+    plot_status = "再利用" if stats.plot_reused else "新規作成"
+    if stats.plot_extensions:
+        plot_status += f"（続きを{stats.plot_extensions}回追加）"
+
+    history = ""
+    if path.exists():
+        existing = read_text(path)
+        mark = "===== 実行履歴 ====="
+        idx = existing.find(mark)
+        history = existing[idx + len(mark) :].strip() if idx != -1 else existing.strip()
+
+    header = (
+        f"入力ファイル: {input_path}\n"
+        f"作業フォルダ: {work_dir}\n"
+        f"使用モデル: {args.model}\n"
+        f"Ollama URL: {args.url}\n"
+        f"本編の累計シーン数: {total_scenes}\n"
+        f"累計処理時間: {format_duration(total_seconds)}\n"
+        f"累計処理時間秒: {int(round(total_seconds))}\n"
+        f"最終実行: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"最終結果: {'完了' if ok else 'エラー'}\n"
+    )
+    run = (
+        f"[{stats.started_at.strftime('%Y-%m-%d %H:%M:%S')}]\n"
+        f"モデル: {args.model}\n"
+        f"URL: {args.url}\n"
+        f"今回作成したシーン数: {stats.scenes_written}\n"
+        f"今回の本編追記字数: {stats.scene_chars}\n"
+        f"本編の累計シーン数: {total_scenes}\n"
+        f"処理時間: {format_duration(elapsed)}\n"
+        f"世界観: {worldview_status}\n"
+        f"プロット: {plot_status}\n"
+        f"世界観更新回数: {stats.worldview_updates}\n"
+        f"保存したプロンプト数: {prompt_logger.saved}\n"
+        f"結果: {'完了' if ok else 'エラー'}\n"
+    )
+    body = header + "\n===== 実行履歴 =====\n\n"
+    if history:
+        body += history.rstrip() + "\n\n"
+    body += run
+    write_text(path, body)
+    log(f"統計.txt を保存しました（今回 {stats.scenes_written} シーン / {format_duration(elapsed)}）。")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     input_path = args.input.expanduser().resolve()
@@ -783,24 +1141,54 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"{name} を削除しました。")
 
     write_text(work_dir / "ベース.txt", source)
+    honpen_path = work_dir / "本編.txt"
+    resuming = (not args.fresh) and (
+        (work_dir / "世界観.txt").exists()
+        or (work_dir / "プロット.txt").exists()
+        or honpen_path.exists()
+    )
     log(f"作業フォルダ: {work_dir}")
     log(f"モデル: {args.model}")
     log(f"作成するシーン数: {args.scenes}")
+    if resuming:
+        log("同じ作品の続きです。既存の世界観・プロットを利用し、本編.txt に追記します。")
 
-    client = OllamaClient(url=args.url, model=args.model, timeout=args.timeout)
-    writer = StoryWriter(client, work_dir)
+    stats = RunStats()
+    prompt_logger = PromptLogger(work_dir / "prompt", args.model)
+    client = OllamaClient(
+        url=args.url,
+        model=args.model,
+        timeout=args.timeout,
+        prompt_logger=prompt_logger,
+    )
+    writer = StoryWriter(client, work_dir, stats)
     writer.sanitize_outputs()
 
+    ok = False
+    plot: list[PlotScene] = []
     try:
         worldview = writer.ensure_worldview(source, force=args.fresh)
-        plot = writer.ensure_plot(source, force=args.fresh)
+        plot = writer.ensure_plot(source, worldview, force=args.fresh)
         writer.write_scenes(source, worldview, plot, args.scenes)
+        ok = True
     except RuntimeError as exc:
         log(str(exc))
-        return 1
+    finally:
+        save_stats(
+            work_dir / "統計.txt",
+            input_path=input_path,
+            work_dir=work_dir,
+            args=args,
+            stats=stats,
+            prompt_logger=prompt_logger,
+            ok=ok,
+            plot=plot,
+        )
 
-    log(f"完了しました: {writer.honpen_path}")
-    return 0
+    if ok:
+        log(f"完了しました: {writer.honpen_path}")
+        return 0
+    return 1
 
 
 if __name__ == "__main__":
