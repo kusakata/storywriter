@@ -118,4 +118,4 @@ python afterword.py 小説.txt
 python afterword.py 小説.txt -q
 ```
 
-結果は `output/<ファイル名>/あとがき.txt` に保存します。文体は本文と変え、丁寧な口調にします。`--url` / `--model` / `--timeout` / `-q` は `storywriter.py` と同じです。
+結果は `output/<ファイル名>/あとがき.txt` に保存します。1000 文字以下、本文とは違う丁寧な口調です。お気に入りのキャラ、友達や家族、最近ハマっているゲームや音楽など、私的な話を少し混ぜてもよいとして指示します。`--url` / `--model` / `--timeout` / `-q` は `storywriter.py` と同じです。
