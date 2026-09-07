@@ -11,6 +11,7 @@
   python storywriter.py novel.txt -q
   python storywriter.py novel.txt --no-shift
   python storywriter.py novel.txt --ending
+  python storywriter.py novel.txt -i
 """
 
 from __future__ import annotations
@@ -157,6 +158,7 @@ class RunStats:
     plot_only: bool = False
     no_shift: bool = False
     ending: bool = False
+    interactive: bool = False
     started_at: datetime = field(default_factory=datetime.now)
     started_mono: float = field(default_factory=time.monotonic)
 
@@ -328,6 +330,34 @@ def log(message: str, *, always: bool = False) -> None:
     if not always and use_log_color():
         text = f"{ANSI_GRAY}{message}{ANSI_RESET}"
     print(text, file=sys.stderr, flush=True)
+
+
+def ask_yes_no(kind: str, body: str) -> bool:
+    """対話モードで採用確認する。y で採用、n で再生成。"""
+    bar = f"===== {kind} ====="
+    print(bar, file=sys.stderr, flush=True)
+    print(body.rstrip() or "（空）", file=sys.stderr, flush=True)
+    print(bar, file=sys.stderr, flush=True)
+    while True:
+        print(
+            "この内容を採用しますか？ [y/n] ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        line = sys.stdin.readline()
+        if line == "":
+            raise RuntimeError("対話入力が閉じられました。")
+        answer = line.strip().lower()
+        if answer in {"y", "yes", "ｙ"}:
+            return True
+        if answer in {"n", "no", "ｎ"}:
+            return False
+        print(
+            "y または n を入力してください。",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def format_duration(seconds: float) -> str:
@@ -1198,83 +1228,122 @@ class StoryWriter:
     ) -> list[str]:
         last_error = ""
         existing_list = list(existing or [])
-        current_prompt = prompt
-        for attempt in range(1, 4):
-            retry_label = f"{create_label}_再試行{attempt}"
-            raw = self.client.generate(
-                current_prompt,
-                temperature=0.35 + 0.1 * (attempt - 1),
-                num_predict=1024,
-                label=create_label if attempt == 1 else retry_label,
-            )
-            format_label = (
-                "プロット整形"
-                if attempt == 1
-                else f"プロット整形_再試行{attempt}"
-            )
-            formatted = self.client.generate(
-                prompt_normalize_plot(
-                    raw,
-                    expected,
-                    tail,
-                    worldview,
-                    past_count=past_count,
-                    no_shift=self.stats.no_shift,
-                    ending=self.stats.ending,
-                ),
-                temperature=0.2,
-                num_predict=1024,
-                show_stream=False,
-                label=format_label,
-            )
-            lines = extract_scene_lines(formatted, expected)
-            if len(lines) < expected:
-                lines = extract_scene_lines(raw, expected)
-            if len(lines) >= expected:
-                lines = [
-                    re.sub(r"\s+", " ", line).strip()
-                    for line in lines[:expected]
-                ]
-                duplicated = existing_list and any(
-                    is_duplicate_plot(line, existing_list) for line in lines
+        extra = ""
+        while True:
+            current_prompt = prompt + extra
+            lines: list[str] | None = None
+            for attempt in range(1, 4):
+                retry_label = f"{create_label}_再試行{attempt}"
+                raw = self.client.generate(
+                    current_prompt,
+                    temperature=0.35 + 0.1 * (attempt - 1),
+                    num_predict=1024,
+                    label=create_label if attempt == 1 else retry_label,
                 )
-                stale_future = future_plots_stale(
-                    lines,
-                    past_count=past_count,
-                    existing=existing_list,
-                    tail=tail,
+                format_label = (
+                    "プロット整形"
+                    if attempt == 1
+                    else f"プロット整形_再試行{attempt}"
                 )
-                if duplicated or (past_count < expected and stale_future):
-                    if self.stats.no_shift and past_count < expected:
-                        return lines
-                    last_error = "新しいシーンが既存内容と重複しています"
-                    log(f"{last_error}。再試行 {attempt}/3")
-                    if past_count >= expected:
-                        current_prompt = (
-                            prompt
-                            + "\n\n【再出力】後続シーンと重複せず、"
-                            "この断片に書かれている出来事だけを"
-                            "時系列で出力すること。"
+                formatted = self.client.generate(
+                    prompt_normalize_plot(
+                        raw,
+                        expected,
+                        tail,
+                        worldview,
+                        past_count=past_count,
+                        no_shift=self.stats.no_shift,
+                        ending=self.stats.ending,
+                    ),
+                    temperature=0.2,
+                    num_predict=1024,
+                    show_stream=False,
+                    label=format_label,
+                )
+                got = extract_scene_lines(formatted, expected)
+                if len(got) < expected:
+                    got = extract_scene_lines(raw, expected)
+                if len(got) >= expected:
+                    got = [
+                        re.sub(r"\s+", " ", line).strip()
+                        for line in got[:expected]
+                    ]
+                    duplicated = existing_list and any(
+                        is_duplicate_plot(line, existing_list)
+                        for line in got
+                    )
+                    stale_future = future_plots_stale(
+                        got,
+                        past_count=past_count,
+                        existing=existing_list,
+                        tail=tail,
+                    )
+                    if duplicated or (
+                        past_count < expected and stale_future
+                    ):
+                        if (
+                            self.stats.no_shift
+                            and past_count < expected
+                        ):
+                            lines = got
+                            break
+                        last_error = (
+                            "新しいシーンが既存内容と重複しています"
                         )
-                    else:
-                        current_prompt = (
-                            prompt
-                            + "\n\n【重要】新しいシーンが既存の本文・"
-                            "プロットと同じ状況に寄っています。"
-                            "場所・時間・相手・目的のいずれかを変えて"
-                            "場面転換し、まだ書かれていない展開だけを"
-                            "書いてください。"
-                        )
-                    continue
+                        log(f"{last_error}。再試行 {attempt}/3")
+                        if past_count >= expected:
+                            current_prompt = (
+                                prompt
+                                + extra
+                                + "\n\n【再出力】後続シーンと重複せず、"
+                                "この断片に書かれている出来事だけを"
+                                "時系列で出力すること。"
+                            )
+                        else:
+                            current_prompt = (
+                                prompt
+                                + extra
+                                + "\n\n【重要】新しいシーンが既存の本文・"
+                                "プロットと同じ状況に寄っています。"
+                                "場所・時間・相手・目的のいずれかを変えて"
+                                "場面転換し、まだ書かれていない展開だけを"
+                                "書いてください。"
+                            )
+                        continue
+                    lines = got
+                    break
+                last_error = f"{len(got)} 行しか得られませんでした"
+                log(
+                    f"プロットの行数が足りません（{last_error}）。"
+                    f"再試行 {attempt}/3"
+                )
+                current_prompt = (
+                    prompt
+                    + extra
+                    + "\n\n【再出力】指定行数だけ、1行1シーンの日本語で"
+                    "出力すること。"
+                )
+            if lines is None:
+                raise RuntimeError(
+                    f"プロットの生成に失敗しました: {last_error}"
+                )
+            if not self.stats.interactive:
                 return lines
-            last_error = f"{len(lines)} 行しか得られませんでした"
-            log(f"プロットの行数が足りません（{last_error}）。再試行 {attempt}/3")
-            current_prompt = (
-                prompt
-                + "\n\n【再出力】指定行数だけ、1行1シーンの日本語で"
-                "出力すること。"
+            if past_count >= expected:
+                return lines
+            preview = "\n".join(
+                f"{PENDING_MARK} {line}" for line in lines
             )
-        raise RuntimeError(f"プロットの生成に失敗しました: {last_error}")
+            if ask_yes_no("プロット", preview):
+                return lines
+            log("不採用のため、プロットを再生成します。", always=True)
+            extra = (
+                "\n\n【再出力】直前の案は採用されませんでした。"
+                "同じ文言の繰り返しにせず、別の表現・別の展開で"
+                "指定形式のまま書き直してください。\n"
+                "不採用だった案:\n"
+                + "\n".join(f"- {line}" for line in lines)
+            )
 
     def refresh_worldview(self, worldview: str) -> str:
         if self.honpen_path.exists():
@@ -1385,29 +1454,49 @@ class StoryWriter:
             tail = last_chars(combined_body(source, self.honpen_path))
 
             log(f"[{i}/{count}] シーンを執筆しています: {target.text[:40]}...")
-            raw = self.client.generate(
-                prompt_write_scene(
-                    worldview,
-                    prev,
-                    target,
-                    tail,
-                    no_shift=self.stats.no_shift,
-                    ending=self.stats.ending,
-                ),
-                temperature=0.85,
-                num_predict=4096,
-                label=f"シーン執筆_{i}",
-            )
-            scene_text = strip_repeated_source(
-                clean_llm_text(raw),
-                source,
+            base_prompt = prompt_write_scene(
+                worldview,
+                prev,
+                target,
                 tail,
-                read_text(self.honpen_path)
-                if self.honpen_path.exists()
-                else "",
+                no_shift=self.stats.no_shift,
+                ending=self.stats.ending,
             )
-            if not scene_text:
-                raise RuntimeError("シーン本文が空でした。")
+            extra = ""
+            rewrite = 0
+            while True:
+                rewrite += 1
+                label = f"シーン執筆_{i}"
+                if rewrite > 1:
+                    label = f"シーン執筆_{i}_再案{rewrite}"
+                raw = self.client.generate(
+                    base_prompt + extra,
+                    temperature=0.85,
+                    num_predict=4096,
+                    label=label,
+                )
+                scene_text = strip_repeated_source(
+                    clean_llm_text(raw),
+                    source,
+                    tail,
+                    read_text(self.honpen_path)
+                    if self.honpen_path.exists()
+                    else "",
+                )
+                if not scene_text:
+                    raise RuntimeError("シーン本文が空でした。")
+                if not self.stats.interactive:
+                    break
+                if ask_yes_no("本文シーン", scene_text):
+                    break
+                log("不採用のため、シーンを再執筆します。", always=True)
+                extra = (
+                    "\n\n【再出力】直前の本文は採用されませんでした。"
+                    "同じ文章の再利用はせず、別の表現でこのシーンを"
+                    "書き直してください。\n"
+                    "不採用だった本文:\n"
+                    f"{scene_text}"
+                )
 
             append_scene(self.honpen_path, scene_text)
             target.done = True
@@ -1495,6 +1584,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "小説の締めくくりとしてシーン末尾をきれいに閉じ、"
             "読後感を良くする"
         ),
+    )
+    parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="これから書くプロットと本文の採用を y/n で確認する",
     )
     args = parser.parse_args(argv)
     if args.scenes < 1:
@@ -1584,6 +1679,7 @@ def save_stats(
         f"本編執筆: {'なし（プロットのみ）' if stats.plot_only else 'あり'}\n"
         f"場面転換の促し: {'オフ' if stats.no_shift else 'オン'}\n"
         f"締めくくり: {'オン' if stats.ending else 'オフ'}\n"
+        f"対話モード: {'オン' if stats.interactive else 'オフ'}\n"
         f"保存したプロンプト数: {prompt_logger.saved}\n"
         f"結果: {'完了' if ok else 'エラー'}\n"
     )
@@ -1646,6 +1742,8 @@ def main(argv: list[str] | None = None) -> int:
         log("場面転換の促し: オフ")
     if args.ending:
         log("締めくくりモード: オン")
+    if args.interactive:
+        log("対話モード: これから書くプロットと本文の採用を確認します")
     if resuming:
         if args.plot_only:
             log(
@@ -1663,6 +1761,7 @@ def main(argv: list[str] | None = None) -> int:
         plot_only=args.plot_only,
         no_shift=args.no_shift,
         ending=args.ending,
+        interactive=args.interactive,
     )
     prompt_logger = PromptLogger(work_dir / "prompt", args.model)
     client = OllamaClient(
