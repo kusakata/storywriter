@@ -295,7 +295,7 @@ ipcMain.handle("select-input", async () => {
     defaultPath: PROJECT_ROOT,
     properties: ["openFile"],
     filters: [
-      { name: "テキスト", extensions: ["txt"] },
+      { name: "テキスト", extensions: ["txt", "md"] },
       { name: "すべてのファイル", extensions: ["*"] },
     ],
   });

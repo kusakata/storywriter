@@ -98,7 +98,7 @@ python storywriter.py 小説.txt -i
 
 | オプション | 説明 | デフォルト |
 |---|---|---|
-| `input` | 入力テキストファイル（必須） | — |
+| `input` | 入力テキストファイル（`.txt` / `.md`、必須） | — |
 | `-n`, `--scenes` | 今回作成する本編シーン数。`--plot-only` 時はプロットへ追加するシーン数 | `3` |
 | `--url` | Ollama の API URL | `http://localhost:11434` |
 | `--model` | 使用するモデル名 | `hf.co/bartowski/Ateron_Gemma-4-Novelist-Eclipse-31B-GGUF:Q4_K_M` |

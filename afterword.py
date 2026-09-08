@@ -104,7 +104,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "input",
         type=Path,
-        help="storywriter.py に渡したのと同じ入力テキストファイル",
+        help="storywriter.py に渡したのと同じ入力ファイル（.txt / .md）",
     )
     parser.add_argument(
         "--url",

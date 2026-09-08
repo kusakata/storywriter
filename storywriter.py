@@ -1519,7 +1519,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "input",
         type=Path,
-        help="入力テキストファイル",
+        help="入力テキストファイル（.txt / .md）",
     )
     parser.add_argument(
         "-n",
