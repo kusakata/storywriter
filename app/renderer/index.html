@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:;"
+    />
+    <title>Storywriter</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <header class="brand">
+          <p class="brand-kana">ものがたりの続きを書く</p>
+          <h1>Storywriter</h1>
+        </header>
+
+        <section class="panel">
+          <h2>原稿</h2>
+          <label class="field">
+            <span>入力ファイル</span>
+            <div class="file-row">
+              <button type="button" id="pick-file">選ぶ</button>
+              <p id="file-name" class="file-name">未選択</p>
+            </div>
+          </label>
+          <label class="field">
+            <span id="scenes-label">シーン数</span>
+            <input id="scenes" type="number" min="1" value="3" />
+          </label>
+        </section>
+
+        <section class="panel">
+          <h2>Ollama</h2>
+          <label class="field">
+            <span>URL</span>
+            <input id="url" type="text" value="http://localhost:11434" />
+          </label>
+          <label class="field">
+            <span>モデル</span>
+            <input
+              id="model"
+              type="text"
+              value="hf.co/bartowski/Ateron_Gemma-4-Novelist-Eclipse-31B-GGUF:Q4_K_M"
+            />
+          </label>
+          <label class="field">
+            <span>タイムアウト（秒）</span>
+            <input id="timeout" type="number" min="1" value="1800" />
+          </label>
+        </section>
+
+        <section class="panel">
+          <h2>執筆オプション</h2>
+          <label class="check"><input id="fresh" type="checkbox" />最初から生成する</label>
+          <label class="check"><input id="news" type="checkbox" />時事ネタを織り込む</label>
+          <label class="check"><input id="plot-only" type="checkbox" />プロットのみ追加</label>
+          <label class="check"><input id="quiet" type="checkbox" />進捗表示を抑える</label>
+          <label class="check"><input id="no-shift" type="checkbox" />場面転換の促しを外す</label>
+          <label class="check"><input id="ending" type="checkbox" />締めくくりとして書く</label>
+          <label class="check">
+            <input id="interactive" type="checkbox" checked />
+            採用を確認する
+          </label>
+        </section>
+
+        <div class="actions">
+          <button type="button" id="run-writer" class="primary">続きを執筆</button>
+          <button type="button" id="run-afterword">あとがきを作成</button>
+          <button type="button" id="stop" class="danger" disabled>停止</button>
+          <button type="button" id="open-output">作業フォルダを開く</button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <div class="toolbar">
+          <nav class="tabs" id="tabs">
+            <button type="button" class="tab active" data-tab="log">ログ</button>
+            <button type="button" class="tab" data-tab="世界観.txt">世界観</button>
+            <button type="button" class="tab" data-tab="プロット.txt">プロット</button>
+            <button type="button" class="tab" data-tab="本編.txt">本編</button>
+            <button type="button" class="tab" data-tab="あとがき.txt">あとがき</button>
+            <button type="button" class="tab" data-tab="統計.txt">統計</button>
+            <button type="button" class="tab" data-tab="時事.txt">時事</button>
+          </nav>
+          <p id="status" class="status">入力ファイルを選んでください</p>
+        </div>
+
+        <section id="ask-panel" class="ask hidden" aria-live="polite">
+          <div class="ask-head">
+            <h2 id="ask-kind">確認</h2>
+            <p>この内容を採用しますか？</p>
+          </div>
+          <pre id="ask-body" class="ask-body"></pre>
+          <div class="ask-actions">
+            <button type="button" id="ask-yes" class="primary">採用する</button>
+            <button type="button" id="ask-no">採用しない（再生成）</button>
+          </div>
+        </section>
+
+        <section id="view-log" class="view">
+          <pre id="log" class="log"></pre>
+        </section>
+        <section id="view-file" class="view hidden">
+          <pre id="file-view" class="manuscript empty">まだファイルがありません</pre>
+        </section>
+      </main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

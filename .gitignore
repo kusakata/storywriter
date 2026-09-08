@@ -4,6 +4,10 @@
 # 生成物
 output/
 
+# Electron
+app/node_modules/
+app/dist/
+
 # Python
 __pycache__/
 *.py[cod]

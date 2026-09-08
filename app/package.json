@@ -1,0 +1,16 @@
+{
+  "name": "storywriter-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "storywriter / afterword のグラフィカルフロントエンド",
+  "main": "main.js",
+  "scripts": {
+    "start": "node start.js"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  }
+}

@@ -1,0 +1,286 @@
+:root {
+  --paper: #f3eee6;
+  --panel: #fffaf2;
+  --ink: #241c14;
+  --muted: #6e6358;
+  --line: #d8cfc2;
+  --wine: #7a3143;
+  --wine-hover: #5f2433;
+  --moss: #3f4a3c;
+  --log: #1c1914;
+  --log-text: #efe6d8;
+  --danger: #8a2f28;
+  --shadow: 0 12px 32px rgba(48, 32, 18, 0.08);
+  font-family: "Hiragino Sans", "Noto Sans CJK JP", "Yu Gothic", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 0.45rem 0.8rem;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: #b9aa98;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--wine);
+  border-color: var(--wine);
+  color: #fffaf2;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--wine-hover);
+}
+
+button.danger {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  height: 100%;
+}
+
+.sidebar {
+  padding: 1.4rem 1.2rem 1.2rem;
+  border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, #f7f2ea 0%, #efe6db 100%);
+  overflow: auto;
+}
+
+.brand-kana {
+  margin: 0;
+  font-size: 0.75rem;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+
+.brand h1 {
+  margin: 0.15rem 0 1.2rem;
+  font-family: "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif CJK JP", serif;
+  font-size: 1.7rem;
+  font-weight: 500;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.9rem 0.95rem 1rem;
+  margin-bottom: 0.85rem;
+  box-shadow: var(--shadow);
+}
+
+.panel h2 {
+  margin: 0 0 0.7rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  color: var(--moss);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.7rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.field:last-child {
+  margin-bottom: 0;
+}
+
+input[type="text"],
+input[type="number"] {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.file-name {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.check {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  margin: 0.28rem 0;
+  font-size: 0.86rem;
+}
+
+.actions {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.workspace {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.8rem 1.1rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.tab {
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  color: var(--muted);
+}
+
+.tab.active {
+  background: var(--wine);
+  border-color: var(--wine);
+  color: #fffaf2;
+}
+
+.status {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.ask {
+  margin: 0.9rem 1.1rem 0;
+  padding: 1rem;
+  border: 1px solid #c9b7a4;
+  background: #fff8ee;
+  border-radius: 12px;
+}
+
+.ask-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: baseline;
+}
+
+.ask-head h2 {
+  margin: 0;
+  font-family: "Hiragino Mincho ProN", "Yu Mincho", serif;
+  font-size: 1.1rem;
+}
+
+.ask-head p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.ask-body {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0.8rem 0;
+  padding: 0.8rem;
+  background: #fff;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  font-family: "Hiragino Mincho ProN", "Yu Mincho", serif;
+  line-height: 1.7;
+}
+
+.ask-actions {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.view {
+  flex: 1;
+  min-height: 0;
+  padding: 0.9rem 1.1rem 1.1rem;
+}
+
+.log,
+.manuscript {
+  height: 100%;
+  margin: 0;
+  overflow: auto;
+  padding: 1rem 1.1rem;
+  border-radius: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log {
+  background: var(--log);
+  color: var(--log-text);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.manuscript {
+  background: #fffdf8;
+  border: 1px solid var(--line);
+  font-family: "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif CJK JP", serif;
+  font-size: 1rem;
+  line-height: 1.9;
+}
+
+.manuscript.empty {
+  color: var(--muted);
+  font-family: inherit;
+}
+
+.hidden {
+  display: none;
+}
