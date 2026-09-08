@@ -31,6 +31,8 @@ const els = {
   askBody: document.getElementById("ask-body"),
   askYes: document.getElementById("ask-yes"),
   askNo: document.getElementById("ask-no"),
+  ollamaToggle: document.getElementById("ollama-toggle"),
+  ollamaBody: document.getElementById("ollama-body"),
 };
 
 const state = {
@@ -72,6 +74,7 @@ function loadSettings() {
     els.ending.checked = Boolean(data.ending);
     els.interactive.checked =
       data.interactive === undefined ? true : Boolean(data.interactive);
+    setOllamaOpen(Boolean(data.ollamaOpen));
   } catch (_err) {
     /* ignore broken local settings */
   }
@@ -93,6 +96,7 @@ function saveSettings() {
       noShift: els.noShift.checked,
       ending: els.ending.checked,
       interactive: els.interactive.checked,
+      ollamaOpen: els.ollamaToggle.getAttribute("aria-expanded") === "true",
     }),
   );
 }
@@ -187,6 +191,11 @@ function syncSceneLabel() {
     : "シーン数";
 }
 
+function setOllamaOpen(open) {
+  els.ollamaToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  els.ollamaBody.classList.toggle("hidden", !open);
+}
+
 async function startJob(kind) {
   if (!state.input) {
     setStatus("入力ファイルを選んでください");
@@ -231,6 +240,12 @@ els.pickFile.addEventListener("click", async () => {
 
 els.plotOnly.addEventListener("change", () => {
   syncSceneLabel();
+  saveSettings();
+});
+
+els.ollamaToggle.addEventListener("click", () => {
+  const open = els.ollamaToggle.getAttribute("aria-expanded") === "true";
+  setOllamaOpen(!open);
   saveSettings();
 });
 

@@ -32,24 +32,35 @@
           </label>
         </section>
 
-        <section class="panel">
-          <h2>Ollama</h2>
-          <label class="field">
-            <span>URL</span>
-            <input id="url" type="text" value="http://localhost:11434" />
-          </label>
-          <label class="field">
-            <span>モデル</span>
-            <input
-              id="model"
-              type="text"
-              value="hf.co/bartowski/Ateron_Gemma-4-Novelist-Eclipse-31B-GGUF:Q4_K_M"
-            />
-          </label>
-          <label class="field">
-            <span>タイムアウト（秒）</span>
-            <input id="timeout" type="number" min="1" value="1800" />
-          </label>
+        <section class="panel" id="ollama-panel">
+          <button
+            type="button"
+            class="panel-toggle"
+            id="ollama-toggle"
+            aria-expanded="false"
+            aria-controls="ollama-body"
+          >
+            <span class="triangle" aria-hidden="true"></span>
+            Ollama
+          </button>
+          <div id="ollama-body" class="panel-body hidden">
+            <label class="field">
+              <span>URL</span>
+              <input id="url" type="text" value="http://localhost:11434" />
+            </label>
+            <label class="field">
+              <span>モデル</span>
+              <input
+                id="model"
+                type="text"
+                value="hf.co/bartowski/Ateron_Gemma-4-Novelist-Eclipse-31B-GGUF:Q4_K_M"
+              />
+            </label>
+            <label class="field">
+              <span>タイムアウト（秒）</span>
+              <input id="timeout" type="number" min="1" value="1800" />
+            </label>
+          </div>
         </section>
 
         <section class="panel">

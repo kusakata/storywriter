@@ -108,6 +108,46 @@ button.danger {
   color: var(--moss);
 }
 
+.panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.1rem 0.15rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  color: var(--moss);
+  text-align: left;
+}
+
+.panel-toggle:hover:not(:disabled) {
+  border-color: transparent;
+  background: rgba(63, 74, 60, 0.08);
+}
+
+.triangle {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 5px 0 5px 7px;
+  border-color: transparent transparent transparent var(--moss);
+  transform: rotate(0deg);
+  transition: transform 0.15s ease;
+}
+
+.panel-toggle[aria-expanded="true"] .triangle {
+  transform: rotate(90deg);
+}
+
+.panel-body {
+  margin-top: 0.7rem;
+}
+
 .field {
   display: flex;
   flex-direction: column;
