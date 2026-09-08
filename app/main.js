@@ -41,6 +41,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 700,
     title: "Storywriter",
+    icon: path.join(__dirname, "icon.svg"),
     backgroundColor: "#f3eee6",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -267,6 +268,7 @@ function afterwordArgs(options) {
   return args;
 }
 
+app.setName("Storywriter");
 app.whenReady().then(() => {
   createWindow();
   app.on("activate", () => {
